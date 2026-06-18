@@ -1,4 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const regent = @import("regent");
+const linux = std.os.linux;
 
 pub const CellMode = enum(u4) {
     glyph = 0,
@@ -194,7 +197,121 @@ pub const Cell = packed struct(u128) {
     data: CellData,
 };
 
-pub fn main(_: std.process.Init.Minimal) u8 {
+pub fn main(init: std.process.Init.Minimal) !u8 {
+    return try regent.trampoline.stackTrampoline(
+        @typeInfo(@TypeOf(trampMain)).@"fn".return_type.?,
+        u6,
+        init,
+        trampMain,
+        if (builtin.mode == .Debug) 3 else 1,
+    );
+}
+
+pub fn trampMain(init: std.process.Init.Minimal, optStackAlloc: ?std.mem.Allocator) !u8 {
+    // if we ever handle args, it's here
+    _ = init;
+
+    const allocator = if (optStackAlloc) |stackAllocator| stackAllocator else std.heap.smp_allocator;
+
+    const stdinFd = std.Io.File.stdin().handle;
+    const beforeTtyAttr = try std.posix.tcgetattr(stdinFd);
+    var ttyAttr = beforeTtyAttr;
+
+    // disablex XON/XOFF ctrl flow
+    ttyAttr.iflag.IXON = false;
+    ttyAttr.iflag.ICRNL = false;
+    ttyAttr.iflag.IUTF8 = true;
+    // This strips the 8th bit, which we need for utf-8
+    ttyAttr.iflag.ISTRIP = false;
+
+    // disable output post procesing
+    ttyAttr.oflag.OPOST = false;
+
+    // char size to 8bits
+    ttyAttr.cflag.CSIZE = .CS8;
+
+    // raw mode instead of line buffer mode
+    ttyAttr.lflag.ICANON = false;
+    // print back input to output
+    ttyAttr.lflag.ECHO = false;
+    // disable all signals
+    ttyAttr.lflag.ISIG = false;
+    // disable extended sequence handling
+    ttyAttr.lflag.IEXTEN = false;
+
+    // since we are using epoll min is 0 (non-blocking read) and no timeout
+    ttyAttr.cc[@intFromEnum(std.posix.V.MIN)] = 0;
+    ttyAttr.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+
+    try std.posix.tcsetattr(stdinFd, .FLUSH, ttyAttr);
+    defer std.posix.tcsetattr(stdinFd, .FLUSH, beforeTtyAttr) catch {};
+
+    var ev: std.Io.Evented = undefined;
+    try ev.init(allocator, .{});
+    const io = ev.io();
+
+    var mask: std.posix.sigset_t = @splat(0);
+    std.posix.sigaddset(&mask, linux.SIG.WINCH);
+    // Block the signal from interrupting our process normally
+    _ = std.posix.sigprocmask(linux.SIG.BLOCK, &mask, null);
+
+    const sigWinchFd = try std.posix.signalfd(-1, &mask, 0);
+
+    const sigFile: std.Io.File = .{ .handle = sigWinchFd, .flags = .{ .nonblocking = true } };
+    defer sigFile.close(io);
+
+    const stdout = std.Io.File.stdout();
+    // TODO: parse ansi commands into structs
+    // those are unbuffered and thats fine for now
+    try stdout.writeStreamingAll(io, "\x1b[2J\x1b[H\x1b[?25l");
+    defer stdout.writeStreamingAll(io, "\x1b[?25h\x1b[2J\x1b[H") catch {};
+
+    // Everything below here is bad
+    // zig stdlib doesnt handle the error set for Evented correctly on some dir apis
+    // so it's also unusable outside master
+    // there are a billion problems with this api, I cant pin the buffers with iouring
+    // i cant pick a good buffer size for the writer considering the even queue
+    // (technically that's events.len + 1 * max size of read to ensure one pop and one queue)
+    // but if I decide to make the code more free-flow, I will have to me insanely careful with this
+    // the code is in fact more agnostic this way and I can leverage fibers this way and not really
+    // stall on a central loop that handles one event at time, but idk how good of an idea that is
+    // stdout events have to block new writes to stdout
+    // stdin events have to be sequential
+    // sigwinch has to be handle carefully because it can change the buffer for stdout as well
+    // as other things
+    const UEvents = union(enum) {
+        sigWinch,
+        inR: anyerror!u32,
+        outW,
+    };
+
+    var buff: [16]UEvents = undefined;
+    var select: std.Io.Select(UEvents) = .init(io, &buff);
+
+    const RandCopy = struct {
+        pub fn read(iio: std.Io, f: std.Io.File) !u32 {
+            var b: [1][]u8 = undefined;
+            var c: [4]u8 = @splat(0);
+            b[0] = &c;
+            _ = f.readStreaming(iio, &b) catch return std.Io.Evented.PipeError.Unexpected;
+            return @bitCast(c);
+        }
+    };
+
+    select.async(.inR, RandCopy.read, .{ io, std.Io.File.stdin() });
+
+    switch (try select.await()) {
+        .inR => |c| {
+            var bbb: [200]u8 = undefined;
+            var www = stdout.writer(io, &bbb);
+            try www.interface.print("C: {x}\n", .{try c});
+            try www.interface.flush();
+        },
+        else => {},
+    }
+
+    try io.sleep(.fromSeconds(10), .awake);
+
     return 0;
 }
 
