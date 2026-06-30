@@ -4,3 +4,5 @@ zig-out
 zig-pkg
 dependencies
 .vscode
+metrics.log
+strace.log
