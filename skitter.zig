@@ -5,7 +5,9 @@ const linux = std.os.linux;
 const terminal = @import("skitter/terminal.zig");
 const is_debug = builtin.mode == .Debug;
 const Allocator = std.mem.Allocator;
-const Grid = @import("skitter/grid.zig");
+const Grid = @import("skitter/Grid.zig");
+const Donut = @import("ex/donut.zig");
+const Trace = @import("skitter/Trace.zig");
 
 const DebugAlloctor = std.heap.DebugAllocator(.{});
 
@@ -67,22 +69,15 @@ pub fn trampMain(args: struct { ?Allocator, *Ctx }) MainError!void {
 pub const RunTtyError = anyerror;
 
 pub fn runTty(ctx: *Ctx) RunTtyError!void {
-    const Telemetry = struct {
-        tag: enum {
-            flush,
-            draw,
-            sleep,
-        },
-        // in nanos
-        value: i96,
-    };
-
-    var timer: std.ArrayList(Telemetry) = .empty;
-    defer timer.deinit(ctx.heapAlloc);
-
     const rctx: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.heapAlloc };
+
+    var trace = try Trace.init(rctx);
+    defer trace.deinit(rctx);
+
     var term: terminal.Terminal = try .init(rctx);
     defer term.deinit(rctx);
+
+    term.trace = &trace;
 
     const size = term.size;
 
@@ -90,96 +85,31 @@ pub fn runTty(ctx: *Ctx) RunTtyError!void {
     try grid.init(size, ctx);
     defer grid.deinit(ctx);
 
-    const clock = std.Io.Clock.awake;
-
     try term.start(ctx.io);
     defer term.stop(ctx.io) catch {};
 
-    var t0 = clock.now(ctx.io);
-
+    try trace.pushTimer(rctx);
     for (0..size.rows) |row| {
         for (0..size.cols) |col| {
             grid.putCell(row, col, .{
                 .mode = .glyph,
                 .data = .{
                     .glyph = .{
-                        .value = ' ',
+                        .char = ' ',
                     },
                 },
             });
         }
     }
+    try trace.popTimer(rctx, .draw);
 
-    try timer.append(ctx.heapAlloc, .{
-        .tag = .draw,
-        .value = t0.untilNow(ctx.io, clock).toNanoseconds(),
-    });
+    try grid.flush(ctx, &term);
 
-    t0 = clock.now(ctx.io);
-    try grid.flush(&term);
-    try timer.append(ctx.heapAlloc, .{
-        .tag = .flush,
-        .value = t0.untilNow(ctx.io, clock).toNanoseconds(),
-    });
-
-    t0 = clock.now(ctx.io);
+    try trace.pushTimer(rctx);
     try ctx.io.sleep(.fromMilliseconds(18), .awake);
-    try timer.append(ctx.heapAlloc, .{
-        .tag = .sleep,
-        .value = t0.untilNow(ctx.io, clock).toNanoseconds(),
-    });
+    try trace.popTimer(rctx, .sleep);
 
-    var frame: usize = 0;
+    try Donut.run(ctx, &grid, &term);
 
-    while (frame < 30 * 60) {
-        t0 = clock.now(ctx.io);
-
-        for (0..size.rows) |row| {
-            for (0..size.cols) |col| {
-                grid.putCell(row, col, .{
-                    .mode = .ansi,
-                    .data = .{
-                        .ansi = .{
-                            .char = @intCast((frame / 10 + row *% col) % ('z' - 'a') + 'a'),
-                            .bg = .init(@intCast((frame / 10 + row *% col) % 0xFF)),
-                            .fg = .init(@intCast(0xFF - ((frame / 10 + row *% col) % 0xFF))),
-                            .bgDefault = false,
-                            .fgDefault = false,
-                            .style = @bitCast(@as(u8, @intCast((frame / 10 + row *% col) % 0xFF))),
-                        },
-                    },
-                });
-            }
-        }
-
-        try timer.append(ctx.heapAlloc, .{
-            .tag = .draw,
-            .value = t0.untilNow(ctx.io, clock).toNanoseconds(),
-        });
-
-        t0 = clock.now(ctx.io);
-        try grid.flush(&term);
-        try timer.append(ctx.heapAlloc, .{
-            .tag = .flush,
-            .value = t0.untilNow(ctx.io, clock).toNanoseconds(),
-        });
-
-        frame += 1;
-
-        t0 = clock.now(ctx.io);
-        try ctx.io.sleep(.fromMilliseconds(17), .awake);
-        try timer.append(ctx.heapAlloc, .{
-            .tag = .sleep,
-            .value = t0.untilNow(ctx.io, clock).toNanoseconds(),
-        });
-    }
-
-    var fs = try regent.fs.FileStream(.write).open(rctx, "metrics.log");
-    defer {
-        fs.close(rctx);
-        fs.deinit(rctx);
-    }
-    for (timer.items) |item|
-        try fs.stream.interface.print("tag: {s}, value: {d} ns\n", .{ @tagName(item.tag), item.value });
-    try fs.stream.interface.flush();
+    try trace.dump();
 }

@@ -6,6 +6,7 @@ const regent = @import("regent");
 const rlinux = regent.linux;
 const is_debug = builtin.mode == .Debug;
 const skitter = @import("../skitter.zig");
+const Trace = @import("Trace.zig");
 
 pub const TermSize = struct {
     rows: usize,
@@ -38,6 +39,7 @@ pub const Terminal = struct {
     fsOut: regent.fs.FileStream(.write),
     sigwinch: File,
     size: TermSize,
+    trace: ?*Trace = null,
 
     beforeTtyAttr: linux.termios,
 

@@ -9,8 +9,8 @@ pub const CellMode = enum(u4) {
 };
 
 pub const GlyphCell = packed struct(u124) {
-    value: u32,
-    _: u92 = 0,
+    char: u21,
+    _: u103 = 0,
 };
 
 pub const Style = packed struct(u8) {
@@ -24,29 +24,50 @@ pub const Style = packed struct(u8) {
     strike: bool = false,
 
     pub fn writeStyle(self: @This(), w: *std.Io.Writer) !void {
-        if (self.bold)
-            try w.writeAll("1;");
+        var needTrail: bool = false;
+        if (self.bold) {
+            try w.writeAll("1");
+            needTrail = true;
+        }
 
-        if (self.dim)
-            try w.writeAll("2;");
+        if (self.dim) {
+            if (needTrail) try w.writeByte(';');
+            try w.writeAll("2");
+            needTrail = true;
+        }
 
-        if (self.italic)
-            try w.writeAll("3;");
+        if (self.italic) {
+            if (needTrail) try w.writeByte(';');
+            try w.writeAll("3");
+            needTrail = true;
+        }
 
-        if (self.underline)
-            try w.writeAll("4;");
+        if (self.underline) {
+            if (needTrail) try w.writeByte(';');
+            try w.writeAll("4");
+            needTrail = true;
+        }
 
-        if (self.blink)
-            try w.writeAll("5;");
+        if (self.blink) {
+            if (needTrail) try w.writeByte(';');
+            try w.writeAll("5");
+            needTrail = true;
+        }
+        if (self.reverseColors) {
+            if (needTrail) try w.writeByte(';');
+            try w.writeAll("7");
+            needTrail = true;
+        }
+        if (self.hidden) {
+            if (needTrail) try w.writeByte(';');
+            try w.writeAll("8");
+            needTrail = true;
+        }
 
-        if (self.reverseColors)
-            try w.writeAll("7;");
-
-        if (self.hidden)
-            try w.writeAll("8;");
-
-        if (self.strike)
-            try w.writeAll("9;");
+        if (self.strike) {
+            if (needTrail) try w.writeByte(';');
+            try w.writeAll("9");
+        }
     }
 };
 
@@ -171,14 +192,19 @@ pub const AnsiColor = packed union {
     }
 };
 
+pub const FlaggedAnsiColor = packed struct(u9) {
+    color: AnsiColor,
+    toggled: bool,
+};
+
 pub const AnsiCell = packed struct(u124) {
-    char: u32,
+    char: u21,
     style: Style,
     fg: AnsiColor,
     fgDefault: bool,
     bg: AnsiColor,
     bgDefault: bool,
-    _: u66 = 0,
+    _: u77 = 0,
 };
 
 pub const RGB = packed struct(u24) {
@@ -197,8 +223,13 @@ pub const UnderlineDecoration = enum(u3) {
     dashed,
 };
 
+pub const FlaggedTrueColor = packed struct(u25) {
+    color: RGB,
+    toggled: bool,
+};
+
 pub const TrueColorCell = packed struct(u124) {
-    char: u32,
+    char: u21,
     style: Style,
     fg: RGB,
     fgDefault: bool,
@@ -207,7 +238,7 @@ pub const TrueColorCell = packed struct(u124) {
     underlineStyle: UnderlineDecoration,
     underline: RGB,
     underlineDefault: bool,
-    _: u6 = 0,
+    _: u17 = 0,
 };
 
 pub const ImageRootCell = packed struct(u124) {
@@ -242,10 +273,10 @@ test "Cell layout size" {
 test "CharCell mode" {
     const cell: Cell = .{
         .mode = .glyph,
-        .data = .{ .glyph = .{ .value = 'A' } },
+        .data = .{ .glyph = .{ .char = 'A' } },
     };
     try testing.expectEqual(.glyph, cell.mode);
-    try testing.expectEqual('A', cell.data.glyph.value);
+    try testing.expectEqual('A', cell.data.glyph.char);
 }
 
 test "AnsiCell Layout & Exact Style Bitmask" {
