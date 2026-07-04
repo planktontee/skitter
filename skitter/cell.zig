@@ -1,4 +1,5 @@
 const std = @import("std");
+const TermSeq = @import("control.zig").TermSeq;
 
 pub const CellMode = enum(u4) {
     skip = 0,
@@ -24,50 +25,31 @@ pub const Style = packed struct(u8) {
     strike: bool = false,
 
     pub fn writeStyle(self: @This(), w: *std.Io.Writer) !void {
-        var needTrail: bool = false;
-        if (self.bold) {
-            try w.writeAll("1");
-            needTrail = true;
-        }
+        var seq: TermSeq = .{};
 
-        if (self.dim) {
-            if (needTrail) try w.writeByte(';');
-            try w.writeAll("2");
-            needTrail = true;
-        }
+        if (self.bold)
+            try seq.writeByte(w, '1');
 
-        if (self.italic) {
-            if (needTrail) try w.writeByte(';');
-            try w.writeAll("3");
-            needTrail = true;
-        }
+        if (self.dim)
+            try seq.writeByte(w, '2');
 
-        if (self.underline) {
-            if (needTrail) try w.writeByte(';');
-            try w.writeAll("4");
-            needTrail = true;
-        }
+        if (self.italic)
+            try seq.writeByte(w, '3');
 
-        if (self.blink) {
-            if (needTrail) try w.writeByte(';');
-            try w.writeAll("5");
-            needTrail = true;
-        }
-        if (self.reverseColors) {
-            if (needTrail) try w.writeByte(';');
-            try w.writeAll("7");
-            needTrail = true;
-        }
-        if (self.hidden) {
-            if (needTrail) try w.writeByte(';');
-            try w.writeAll("8");
-            needTrail = true;
-        }
+        if (self.underline)
+            try seq.writeByte(w, '4');
 
-        if (self.strike) {
-            if (needTrail) try w.writeByte(';');
-            try w.writeAll("9");
-        }
+        if (self.blink)
+            try seq.writeByte(w, '5');
+
+        if (self.reverseColors)
+            try seq.writeByte(w, '7');
+
+        if (self.hidden)
+            try seq.writeByte(w, '8');
+
+        if (self.strike)
+            try seq.writeByte(w, '9');
     }
 };
 
@@ -181,12 +163,19 @@ pub const AnsiColor = packed union {
 
     pub fn write(self: @This(), comptime isBg: bool, w: *std.Io.Writer) !void {
         switch (self.tag()) {
-            .system => try w.print("{d}", .{@as(u8, @bitCast(self))}),
-            inline else => {
-                try w.print("{s}{d}", .{ if (isBg)
-                    "48;5;"
+            .system => {
+                const idx = @as(u8, @bitCast(self));
+                const code = if (idx < 8)
+                    (if (isBg) 40 else 30) + idx
                 else
-                    "38;5;", @as(u8, @bitCast(self)) });
+                    (if (isBg) 100 else 90) + (idx - 8);
+                try w.print("{d}", .{code});
+            },
+            inline else => {
+                try w.print(if (isBg)
+                    "48;5;{d}"
+                else
+                    "38;5;{d}", .{@as(u8, @bitCast(self))});
             },
         }
     }

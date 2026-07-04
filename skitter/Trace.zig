@@ -26,18 +26,12 @@ clock: std.Io.Clock,
 pub const DEFAULT_FILE_NAME: []const u8 = "metrics.log";
 
 pub fn init(context: regent.ergo.Context) !@This() {
-    const fs: regent.fs.FileStream(.write) = regent.fs.FileStream(.write).open(context, DEFAULT_FILE_NAME) catch |e| switch (e) {
-        error.FileNotFound => r: {
-            const cwd = std.Io.Dir.cwd();
-            const file = try cwd.createFile(context.io, DEFAULT_FILE_NAME, .{
-                .read = true,
-                .truncate = false,
-            });
-
-            break :r try .openStream(context, file);
-        },
-        else => return e,
-    };
+    const cwd = std.Io.Dir.cwd();
+    const file = try cwd.createFile(context.io, DEFAULT_FILE_NAME, .{
+        .read = true,
+        .truncate = true,
+    });
+    const fs: regent.fs.FileStream(.write) = try regent.fs.FileStream(.write).openStream(context, file);
 
     return .{
         .fs = fs,

@@ -11,33 +11,90 @@ const regent = @import("regent");
 
 size: TermSize,
 
-bChar: []u21,
-sChar: []u21,
+bChar: []align(alignmentBytes) u21,
+sChar: []align(alignmentBytes) u21,
 
-bStyle: []lcell.Style,
-sStyle: []lcell.Style,
+bStyle: []align(alignmentBytes) lcell.Style,
+sStyle: []align(alignmentBytes) lcell.Style,
 
-bFgAnsi: []lcell.FlaggedAnsiColor,
-sFgAnsi: []lcell.FlaggedAnsiColor,
+bFgAnsi: []align(alignmentBytes) lcell.FlaggedAnsiColor,
+sFgAnsi: []align(alignmentBytes) lcell.FlaggedAnsiColor,
 
-bBgAnsi: []lcell.FlaggedAnsiColor,
-sBgAnsi: []lcell.FlaggedAnsiColor,
+bBgAnsi: []align(alignmentBytes) lcell.FlaggedAnsiColor,
+sBgAnsi: []align(alignmentBytes) lcell.FlaggedAnsiColor,
 
-bFgTrue: []lcell.FlaggedTrueColor,
-sFgTrue: []lcell.FlaggedTrueColor,
+bFgTrue: []align(alignmentBytes) lcell.FlaggedTrueColor,
+sFgTrue: []align(alignmentBytes) lcell.FlaggedTrueColor,
 
-bBgTrue: []lcell.FlaggedTrueColor,
-sBgTrue: []lcell.FlaggedTrueColor,
+bBgTrue: []align(alignmentBytes) lcell.FlaggedTrueColor,
+sBgTrue: []align(alignmentBytes) lcell.FlaggedTrueColor,
 
-bUdTrue: []lcell.FlaggedTrueColor,
-sUdTrue: []lcell.FlaggedTrueColor,
+bUdTrue: []align(alignmentBytes) lcell.FlaggedTrueColor,
+sUdTrue: []align(alignmentBytes) lcell.FlaggedTrueColor,
 
-bUdDeco: []lcell.UnderlineDecoration,
-sUdDeco: []lcell.UnderlineDecoration,
+bUdDeco: []align(alignmentBytes) lcell.UnderlineDecoration,
+sUdDeco: []align(alignmentBytes) lcell.UnderlineDecoration,
 
 rng: std.Random.IoSource,
 
-const alignment: std.mem.Alignment = .fromByteUnits(if (std.simd.suggestVectorLength(u8)) |L| L else 8);
+state: CellFmt = .{},
+
+const FmtColor = union(enum) {
+    default,
+    ansi: lcell.AnsiColor,
+    rgb: lcell.RGB,
+
+    fn eql(a: @This(), b: @This()) bool {
+        if (@as(std.meta.Tag(@This()), a) != @as(std.meta.Tag(@This()), b)) return false;
+        return switch (a) {
+            .default => true,
+            .ansi => |c| @as(u8, @bitCast(c)) == @as(u8, @bitCast(b.ansi)),
+            .rgb => |c| @as(u24, @bitCast(c)) == @as(u24, @bitCast(b.rgb)),
+        };
+    }
+};
+
+const CellFmt = struct {
+    style: lcell.Style = @bitCast(@as(u8, 0)),
+    fg: FmtColor = .default,
+    bg: FmtColor = .default,
+    udDeco: lcell.UnderlineDecoration = .none,
+    // Since ansi doesnt support this we get away with optional
+    udColor: ?lcell.RGB = null,
+
+    fn eql(a: *const @This(), b: *const @This()) bool {
+        return a.fg.eql(b.fg) and
+            a.bg.eql(b.bg) and
+            @as(u8, @bitCast(a.style)) == @as(u8, @bitCast(b.style)) and
+            a.udDeco == b.udDeco and
+            if (a.udColor) |aUdC|
+                if (b.udColor) |bUdC|
+                    @as(u24, @bitCast(aUdC)) == @as(u24, @bitCast(bUdC))
+                else
+                    false
+            else
+                b.udColor == null;
+    }
+};
+
+fn toCellFmt(self: *const @This(), target: *CellFmt, idx: usize) void {
+    target.style = self.bStyle[idx];
+    target.fg = if (self.bFgAnsi[idx].toggled) .{
+        .ansi = self.bFgAnsi[idx].color,
+    } else if (self.bFgTrue[idx].toggled) .{
+        .rgb = self.bFgTrue[idx].color,
+    } else .default;
+    target.bg = if (self.bBgAnsi[idx].toggled) .{
+        .ansi = self.bBgAnsi[idx].color,
+    } else if (self.bBgTrue[idx].toggled) .{
+        .rgb = self.bBgTrue[idx].color,
+    } else .default;
+    target.udDeco = self.bUdDeco[idx];
+    target.udColor = if (self.bUdTrue[idx].toggled) self.bUdTrue[idx].color else null;
+}
+
+const alignmentBytes = if (std.simd.suggestVectorLength(u8)) |L| L else 8;
+const alignment: std.mem.Alignment = .fromByteUnits(alignmentBytes);
 
 pub fn init(self: *@This(), size: TermSize, ctx: *Ctx) std.mem.Allocator.Error!void {
     self.size = size;
@@ -103,8 +160,8 @@ pub fn deinit(self: *@This(), ctx: *Ctx) void {
 }
 
 pub fn putCell(self: *@This(), row: usize, col: usize, cell: lcell.Cell) void {
+    if (row >= self.size.rows or col >= self.size.cols) return;
     const idx = row * self.size.cols + col;
-    assert(idx < (self.size.rows * self.size.cols));
 
     // Every mode uses the character slot (except skip/imageRoot padding)
     // We extract it dynamically or fall back to 0
@@ -168,21 +225,21 @@ pub fn fullFlush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {
     if (term.trace) |t| try t.pushTimer(rctx);
     try control.moveCursor(w, 0, 0);
     for (0..self.size.rows * self.size.cols) |i| {
-        try self.writeCellAt(w, i);
+        _ = try self.writeCellAt(w, i);
     }
     if (term.trace) |t| try t.popTimer(rctx, .@"grid.full.serialize");
 
-    const strictly_buffered = w.buffered().len;
+    const bufferedLen = w.buffered().len;
 
     if (term.trace) |t| try t.metrics.append(ctx.heapAlloc, .{
-        .@"grid.full.size" = strictly_buffered,
+        .@"grid.full.size" = bufferedLen,
     });
 
     if (term.trace) |t| try t.pushTimer(rctx);
     try w.flush();
 
     // TODO: make this better
-    if (strictly_buffered > 0) {
+    if (bufferedLen > 0) {
         @memcpy(self.sChar, self.bChar);
         @memcpy(self.sStyle, self.bStyle);
         @memcpy(self.sFgAnsi, self.bFgAnsi);
@@ -209,79 +266,79 @@ pub fn flush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {
 
     const w: *std.Io.Writer = &term.fsOut.stream.interface;
     const cols = self.size.cols;
-    const total_cells = self.size.rows * cols;
+    const totalCells = self.size.rows * cols;
 
     var jumpCursor: bool = true;
     var i: usize = 0;
 
     // zig is annoying as hell about packed structs and sizes in vec, so this is needed
-    const b_char_ptr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.bChar.ptr));
-    const s_char_ptr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.sChar.ptr));
+    const bCharPtr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.bChar.ptr));
+    const sCharPtr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.sChar.ptr));
 
-    const b_style_ptr: [*]const u8 = @ptrCast(self.bStyle.ptr);
-    const s_style_ptr: [*]const u8 = @ptrCast(self.sStyle.ptr);
+    const bStylePtr: [*]const u8 = @ptrCast(self.bStyle.ptr);
+    const sStylePtr: [*]const u8 = @ptrCast(self.sStyle.ptr);
 
-    const b_fg_ansi_ptr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.bFgAnsi.ptr));
-    const s_fg_ansi_ptr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.sFgAnsi.ptr));
+    const bFgAnsiPtr: [*]align(@alignOf(u16)) const u16 = @ptrCast(@alignCast(self.bFgAnsi.ptr));
+    const sFgAnsiPtr: [*]align(@alignOf(u16)) const u16 = @ptrCast(@alignCast(self.sFgAnsi.ptr));
 
-    const b_bg_ansi_ptr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.bBgAnsi.ptr));
-    const s_bg_ansi_ptr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.sBgAnsi.ptr));
+    const bBgAnsiPtr: [*]align(@alignOf(u16)) const u16 = @ptrCast(@alignCast(self.bBgAnsi.ptr));
+    const sBgAnsiPtr: [*]align(@alignOf(u16)) const u16 = @ptrCast(@alignCast(self.sBgAnsi.ptr));
 
-    const b_fg_true_ptr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.bFgTrue.ptr));
-    const s_fg_true_ptr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.sFgTrue.ptr));
+    const bFgTruePtr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.bFgTrue.ptr));
+    const sFgTruePtr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.sFgTrue.ptr));
 
-    const b_bg_true_ptr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.bBgTrue.ptr));
-    const s_bg_true_ptr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.sBgTrue.ptr));
+    const bBgTruePtr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.bBgTrue.ptr));
+    const sBgTruePtr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.sBgTrue.ptr));
 
-    const b_ud_true_ptr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.bUdTrue.ptr));
-    const s_ud_true_ptr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.sUdTrue.ptr));
+    const bUdTruePtr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.bUdTrue.ptr));
+    const sUdTruePtr: [*]align(@alignOf(u32)) const u32 = @ptrCast(@alignCast(self.sUdTrue.ptr));
 
-    const b_deco_ptr: [*]const u8 = @ptrCast(self.bUdDeco.ptr);
-    const s_deco_ptr: [*]const u8 = @ptrCast(self.sUdDeco.ptr);
+    const bDecoPtr: [*]const u8 = @ptrCast(self.bUdDeco.ptr);
+    const sDecoPtr: [*]const u8 = @ptrCast(self.sUdDeco.ptr);
 
     if (std.simd.suggestVectorLength(u32)) |VLen| {
-        while (i + VLen <= total_cells) : (i += VLen) {
-            const b_char_v: @Vector(VLen, u32) = b_char_ptr[i..][0..VLen].*;
-            const s_char_v: @Vector(VLen, u32) = s_char_ptr[i..][0..VLen].*;
+        while (i + VLen <= totalCells) : (i += VLen) {
+            const bCharV: @Vector(VLen, u32) = bCharPtr[i..][0..VLen].*;
+            const sCharV: @Vector(VLen, u32) = sCharPtr[i..][0..VLen].*;
 
-            const b_style_v: @Vector(VLen, u8) = b_style_ptr[i..][0..VLen].*;
-            const s_style_v: @Vector(VLen, u8) = s_style_ptr[i..][0..VLen].*;
+            const bStyleV: @Vector(VLen, u8) = bStylePtr[i..][0..VLen].*;
+            const sStyleV: @Vector(VLen, u8) = sStylePtr[i..][0..VLen].*;
 
-            const b_fg_ansi_v: @Vector(VLen, u32) = b_fg_ansi_ptr[i..][0..VLen].*;
-            const s_fg_ansi_v: @Vector(VLen, u32) = s_fg_ansi_ptr[i..][0..VLen].*;
+            const bFgAnsiV: @Vector(VLen, u16) = bFgAnsiPtr[i..][0..VLen].*;
+            const sFgAnsiV: @Vector(VLen, u16) = sFgAnsiPtr[i..][0..VLen].*;
 
-            const b_bg_ansi_v: @Vector(VLen, u32) = b_bg_ansi_ptr[i..][0..VLen].*;
-            const s_bg_ansi_v: @Vector(VLen, u32) = s_bg_ansi_ptr[i..][0..VLen].*;
+            const bBgAnsiV: @Vector(VLen, u16) = bBgAnsiPtr[i..][0..VLen].*;
+            const sBgAnsiV: @Vector(VLen, u16) = sBgAnsiPtr[i..][0..VLen].*;
 
-            const b_fg_true_v: @Vector(VLen, u32) = b_fg_true_ptr[i..][0..VLen].*;
-            const s_fg_true_v: @Vector(VLen, u32) = s_fg_true_ptr[i..][0..VLen].*;
+            const bFgTrueV: @Vector(VLen, u32) = bFgTruePtr[i..][0..VLen].*;
+            const sFgTrueV: @Vector(VLen, u32) = sFgTruePtr[i..][0..VLen].*;
 
-            const b_bg_true_v: @Vector(VLen, u32) = b_bg_true_ptr[i..][0..VLen].*;
-            const s_bg_true_v: @Vector(VLen, u32) = s_bg_true_ptr[i..][0..VLen].*;
+            const bBgTrueV: @Vector(VLen, u32) = bBgTruePtr[i..][0..VLen].*;
+            const sBgTrueV: @Vector(VLen, u32) = sBgTruePtr[i..][0..VLen].*;
 
-            const b_ud_true_v: @Vector(VLen, u32) = b_ud_true_ptr[i..][0..VLen].*;
-            const s_ud_true_v: @Vector(VLen, u32) = s_ud_true_ptr[i..][0..VLen].*;
+            const bUdTrueV: @Vector(VLen, u32) = bUdTruePtr[i..][0..VLen].*;
+            const sUdTrueV: @Vector(VLen, u32) = sUdTruePtr[i..][0..VLen].*;
 
-            const b_deco_v: @Vector(VLen, u8) = b_deco_ptr[i..][0..VLen].*;
-            const s_deco_v: @Vector(VLen, u8) = s_deco_ptr[i..][0..VLen].*;
+            const bDecoV: @Vector(VLen, u8) = bDecoPtr[i..][0..VLen].*;
+            const sDecoV: @Vector(VLen, u8) = sDecoPtr[i..][0..VLen].*;
 
-            const diff_char = b_char_v ^ s_char_v;
-            const diff_style = b_style_v ^ s_style_v;
-            const diff_fg_ansi = b_fg_ansi_v ^ s_fg_ansi_v;
-            const diff_bg_ansi = b_bg_ansi_v ^ s_bg_ansi_v;
-            const diff_fg_true = b_fg_true_v ^ s_fg_true_v;
-            const diff_bg_true = b_bg_true_v ^ s_bg_true_v;
-            const diff_ud_true = b_ud_true_v ^ s_ud_true_v;
-            const diff_ud_deco = b_deco_v ^ s_deco_v;
+            const diffChar = bCharV ^ sCharV;
+            const diffStyle = bStyleV ^ sStyleV;
+            const diffFgAnsi = bFgAnsiV ^ sFgAnsiV;
+            const diffBgAnsi = bBgAnsiV ^ sBgAnsiV;
+            const diffFgTrue = bFgTrueV ^ sFgTrueV;
+            const diffBgTrue = bBgTrueV ^ sBgTrueV;
+            const diffUdTrue = bUdTrueV ^ sUdTrueV;
+            const diffUdDeco = bDecoV ^ sDecoV;
 
-            const changed: @Vector(VLen, bool) = (diff_char != @as(@Vector(VLen, u32), @splat(0))) |
-                (diff_style != @as(@Vector(VLen, u8), @splat(0))) |
-                (diff_fg_ansi != @as(@Vector(VLen, u32), @splat(0))) |
-                (diff_bg_ansi != @as(@Vector(VLen, u32), @splat(0))) |
-                (diff_fg_true != @as(@Vector(VLen, u32), @splat(0))) |
-                (diff_bg_true != @as(@Vector(VLen, u32), @splat(0))) |
-                (diff_ud_true != @as(@Vector(VLen, u32), @splat(0))) |
-                (diff_ud_deco != @as(@Vector(VLen, u8), @splat(0)));
+            const changed: @Vector(VLen, bool) = (diffChar != @as(@Vector(VLen, u32), @splat(0))) |
+                (diffStyle != @as(@Vector(VLen, u8), @splat(0))) |
+                (diffFgAnsi != @as(@Vector(VLen, u16), @splat(0))) |
+                (diffBgAnsi != @as(@Vector(VLen, u16), @splat(0))) |
+                (diffFgTrue != @as(@Vector(VLen, u32), @splat(0))) |
+                (diffBgTrue != @as(@Vector(VLen, u32), @splat(0))) |
+                (diffUdTrue != @as(@Vector(VLen, u32), @splat(0))) |
+                (diffUdDeco != @as(@Vector(VLen, u8), @splat(0)));
 
             inline for (0..VLen) |idx| {
                 const iIdx = i + idx;
@@ -290,8 +347,7 @@ pub fn flush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {
                         try control.moveCursor(w, iIdx / cols, iIdx % cols);
                         jumpCursor = false;
                     }
-                    // TODO: style and color reset
-                    try self.writeCellAt(w, iIdx);
+                    if (!try self.writeCellAt(w, iIdx)) jumpCursor = true;
                 } else if (!jumpCursor) {
                     jumpCursor = true;
                 }
@@ -299,7 +355,7 @@ pub fn flush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {
         }
     }
 
-    while (i < total_cells) : (i += 1) {
+    while (i < totalCells) : (i += 1) {
         const has_diff = (self.bChar[i] != self.sChar[i]) or
             (@as(u8, @bitCast(self.bStyle[i])) != @as(u8, @bitCast(self.sStyle[i]))) or
             (@as(u9, @bitCast(self.bFgAnsi[i])) != @as(u9, @bitCast(self.sFgAnsi[i]))) or
@@ -314,24 +370,24 @@ pub fn flush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {
                 try control.moveCursor(w, i / cols, i % cols);
                 jumpCursor = false;
             }
-            try self.writeCellAt(w, i);
+            if (!try self.writeCellAt(w, i)) jumpCursor = true;
         } else if (!jumpCursor) {
             jumpCursor = true;
         }
     }
     if (term.trace) |t| try t.popTimer(rctx, .@"grid.diff.serialize");
 
-    const strictly_buffered = w.buffered().len;
+    const bufferedLen = w.buffered().len;
 
     if (term.trace) |t| try t.metrics.append(ctx.heapAlloc, .{
-        .@"grid.diff.size" = strictly_buffered,
+        .@"grid.diff.size" = bufferedLen,
     });
 
     if (term.trace) |t| try t.pushTimer(rctx);
     try w.flush();
 
     // TODO: make this better
-    if (strictly_buffered > 0) {
+    if (bufferedLen > 0) {
         @memcpy(self.sChar, self.bChar);
         @memcpy(self.sStyle, self.bStyle);
         @memcpy(self.sFgAnsi, self.bFgAnsi);
@@ -344,49 +400,97 @@ pub fn flush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {
     if (term.trace) |t| try t.popTimer(rctx, .@"grid.diff.flush");
 }
 
-fn writeCellAt(self: *@This(), w: *std.Io.Writer, idx: usize) !void {
+fn writeCellAt(self: *@This(), w: *std.Io.Writer, idx: usize) !bool {
     const char = self.bChar[idx];
-    if (char == 0) return;
+    if (char == 0) return false;
 
-    try w.writeAll("\x1b[");
+    const from = self.state;
+    var newFmt: CellFmt = undefined;
+    self.toCellFmt(&newFmt, idx);
+    const to: *const CellFmt = &newFmt;
 
-    try self.bStyle[idx].writeStyle(w);
+    var seq: control.TermSeq = .{};
 
-    var needTrail: bool = false;
-    const fg_ansi = self.bFgAnsi[idx];
-    if (fg_ansi.toggled) {
-        try fg_ansi.color.write(false, w);
-        needTrail = true;
-    }
-    const bg_ansi = self.bBgAnsi[idx];
-    if (bg_ansi.toggled) {
-        if (needTrail) try w.writeByte(';');
-        try bg_ansi.color.write(true, w);
-        needTrail = true;
-    }
+    const lhStyle = from.style;
+    const rhStyle = to.style;
 
-    const fg_true = self.bFgTrue[idx];
-    if (fg_true.toggled) {
-        if (needTrail) try w.writeByte(';');
-        try w.print("38;2;{d};{d};{d}", .{ fg_true.color.r, fg_true.color.g, fg_true.color.b });
-        needTrail = true;
-    }
-    const bg_true = self.bBgTrue[idx];
-    if (bg_true.toggled) {
-        if (needTrail) try w.writeByte(';');
-        try w.print("48;2;{d};{d};{d}", .{ bg_true.color.r, bg_true.color.g, bg_true.color.b });
-        needTrail = true;
+    // TODO: move this inside CellFmt or cell.Style
+    // bold and dim share the same turnoff code (22)
+    // further turn-ons need to be done after
+    const boldOff = lhStyle.bold and !rhStyle.bold;
+    const dimOff = lhStyle.dim and !rhStyle.dim;
+    if (boldOff or dimOff) {
+        try seq.write(w, "22");
+        if (rhStyle.bold) try seq.writeByte(w, '1');
+        if (rhStyle.dim) try seq.writeByte(w, '2');
+    } else {
+        if (!lhStyle.bold and rhStyle.bold) try seq.writeByte(w, '1');
+        if (!lhStyle.dim and rhStyle.dim) try seq.writeByte(w, '2');
     }
 
-    const ud_deco = self.bUdDeco[idx];
-    if (ud_deco != .none) {
-        if (needTrail) try w.writeByte(';');
-        try w.print("4:{d};", .{@intFromEnum(ud_deco)});
-        const ud_true = self.bUdTrue[idx];
-        if (ud_true.toggled) {
-            try w.print("58;2;{d};{d};{d}", .{ ud_true.color.r, ud_true.color.g, ud_true.color.b });
+    // TODO: move this to inside Style
+    inline for (.{
+        .{ "italic", '3', "23" },
+        .{ "underline", '4', "24" },
+        .{ "blink", '5', "25" },
+        .{ "reverseColors", '7', "27" },
+        .{ "hidden", '8', "28" },
+        .{ "strike", '9', "29" },
+    }) |spec| {
+        const field = spec.@"0";
+        const on = spec.@"1";
+        const off = spec.@"2";
+
+        if (@field(lhStyle, field) and !@field(rhStyle, field))
+            try seq.write(w, off)
+        else if (!@field(lhStyle, field) and @field(rhStyle, field))
+            try seq.writeByte(w, on);
+    }
+
+    if (!from.fg.eql(to.fg)) {
+        switch (to.fg) {
+            .default => try seq.write(w, "39"),
+            .ansi => |c| {
+                try seq.nextToken(w);
+                try c.write(false, w);
+            },
+            .rgb => |c| try seq.print(w, "38;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
         }
     }
 
-    try w.print("m{u}", .{char});
+    if (!from.bg.eql(to.bg)) {
+        switch (to.bg) {
+            .default => try seq.write(w, "49"),
+            .ansi => |c| {
+                try seq.nextToken(w);
+                try c.write(true, w);
+            },
+            .rgb => |c| try seq.print(w, "48;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
+        }
+    }
+
+    if (from.udDeco != to.udDeco)
+        if (to.udDeco == .none)
+            try seq.write(w, "4:0")
+        else
+            try seq.print(w, "4:{d}", .{@intFromEnum(to.udDeco)});
+
+    if (if (from.udColor) |fC|
+        if (to.udColor) |tC|
+            @as(u24, @bitCast(fC)) != @as(u24, @bitCast(tC))
+        else
+            true
+    else
+        to.udColor != null)
+        if (to.udColor) |c|
+            try seq.print(w, "58;2;{d};{d};{d}", .{ c.r, c.g, c.b })
+        else
+            try seq.write(w, "58");
+
+    try seq.finish(w);
+
+    self.state = newFmt;
+    try w.print("{u}", .{char});
+
+    return true;
 }
