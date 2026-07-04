@@ -10,6 +10,8 @@ const control = @import("control.zig");
 const regent = @import("regent");
 
 size: TermSize,
+pos: terminal.Pos,
+trueSize: TermSize,
 
 bChar: []align(alignmentBytes) u21,
 sChar: []align(alignmentBytes) u21,
@@ -96,8 +98,10 @@ fn toCellFmt(self: *const @This(), target: *CellFmt, idx: usize) void {
 const alignmentBytes = if (std.simd.suggestVectorLength(u8)) |L| L else 8;
 const alignment: std.mem.Alignment = .fromByteUnits(alignmentBytes);
 
-pub fn init(self: *@This(), size: TermSize, ctx: *Ctx) std.mem.Allocator.Error!void {
+pub fn init(self: *@This(), pos: terminal.Pos, size: TermSize, ctx: *Ctx) std.mem.Allocator.Error!void {
     self.size = size;
+    self.pos = pos;
+
     const targetSize: usize = size.rows * size.cols;
 
     self.bChar = try ctx.heapAlloc.alignedAlloc(u21, alignment, targetSize);
@@ -223,8 +227,13 @@ pub fn fullFlush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {
 
     const rctx: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.heapAlloc };
     if (term.trace) |t| try t.pushTimer(rctx);
-    try control.moveCursor(w, 0, 0);
+    try control.moveCursor(w, self.pos.x, self.pos.y);
+    var line: usize = 0;
     for (0..self.size.rows * self.size.cols) |i| {
+        if (i / self.size.cols > line) {
+            try w.writeAll(control.moveToNextLine());
+            line += 1;
+        }
         _ = try self.writeCellAt(w, i);
     }
     if (term.trace) |t| try t.popTimer(rctx, .@"grid.full.serialize");
@@ -296,6 +305,7 @@ pub fn flush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {
     const bDecoPtr: [*]const u8 = @ptrCast(self.bUdDeco.ptr);
     const sDecoPtr: [*]const u8 = @ptrCast(self.sUdDeco.ptr);
 
+    var line: usize = 0;
     if (std.simd.suggestVectorLength(u32)) |VLen| {
         while (i + VLen <= totalCells) : (i += VLen) {
             const bCharV: @Vector(VLen, u32) = bCharPtr[i..][0..VLen].*;
@@ -342,10 +352,12 @@ pub fn flush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {
 
             inline for (0..VLen) |idx| {
                 const iIdx = i + idx;
+                if (line != iIdx / cols) jumpCursor = true;
                 if (changed[idx]) {
                     if (jumpCursor) {
-                        try control.moveCursor(w, iIdx / cols, iIdx % cols);
+                        try control.moveCursor(w, self.pos.x + iIdx % cols, self.pos.y + iIdx / cols);
                         jumpCursor = false;
+                        line = iIdx / cols;
                     }
                     if (!try self.writeCellAt(w, iIdx)) jumpCursor = true;
                 } else if (!jumpCursor) {
@@ -366,9 +378,11 @@ pub fn flush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {
             (self.bUdDeco[i] != self.sUdDeco[i]);
 
         if (has_diff) {
+            if (line != 1 / cols) jumpCursor = true;
             if (jumpCursor) {
-                try control.moveCursor(w, i / cols, i % cols);
+                try control.moveCursor(w, self.pos.x + i % cols, self.pos.y + i / cols);
                 jumpCursor = false;
+                line = i / cols;
             }
             if (!try self.writeCellAt(w, i)) jumpCursor = true;
         } else if (!jumpCursor) {

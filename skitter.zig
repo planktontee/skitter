@@ -8,6 +8,8 @@ const Allocator = std.mem.Allocator;
 const Grid = @import("skitter/Grid.zig");
 const Donut = @import("ex/donut.zig");
 const Trace = @import("skitter/Trace.zig");
+const mArgs = @import("skitter/args.zig");
+const ArgsResponse = mArgs.ArgsResponse;
 
 const DebugAlloctor = std.heap.DebugAllocator(.{});
 
@@ -19,7 +21,7 @@ pub const Ctx = struct {
     io: std.Io,
 };
 
-pub fn main() !u8 {
+pub fn main(init: std.process.Init.Minimal) !u8 {
     var dba: DebugAlloctor = .init;
     defer _ = dba.deinit();
 
@@ -39,19 +41,21 @@ pub fn main() !u8 {
         u6,
         1,
         trampMain,
-        .{ stackAlloc, &ctx },
+        .{ stackAlloc, &ctx, init },
     );
 
     return 0;
 }
 
-pub const MainError = error{
-    MissingStackAllocator,
-} || RunTtyError || anyerror;
-
-pub fn trampMain(args: struct { ?Allocator, *Ctx }) MainError!void {
-    const optStackAlloc, const ctx = args;
+pub fn trampMain(args: struct { ?Allocator, *Ctx, std.process.Init.Minimal }) !void {
+    const optStackAlloc, const ctx, const init = args;
     ctx.stackAlloc = if (optStackAlloc) |a| a else return error.MissingStackAllocator;
+
+    var argsRes: ArgsResponse = .init(ctx.stackAlloc);
+    defer argsRes.deinit();
+
+    var tIo = std.Io.Threaded.init_single_threaded;
+    ctx.io = tIo.io();
 
     // var evented: std.Io.Evented = undefined;
     // try evented.init(ctx.heapAlloc, .{ .thread_limit = 1 });
@@ -59,22 +63,37 @@ pub fn trampMain(args: struct { ?Allocator, *Ctx }) MainError!void {
 
     // ctx.io = evented.io();
 
-    var tIo = std.Io.Threaded.init_single_threaded;
-    ctx.io = tIo.io();
+    if (argsRes.parseArgs(init.args)) |parseError| {
+        const msg = try std.fmt.allocPrint(ctx.stackAlloc, "Last opt <{?s}>, Last token <{?s}>. {s}", .{
+            parseError.lastOpt,
+            parseError.lastToken,
+            parseError.message orelse unreachable,
+        });
+        defer ctx.stackAlloc.free(msg);
 
-    // From this point onwards Ctx is fully populated
-    try runTty(ctx);
+        try std.Io.File.stderr().writeStreamingAll(ctx.io, msg);
+        return parseError.err;
+    }
+
+    if (argsRes.verb.? == .donut)
+        try runDonut(ctx, &argsRes);
 }
 
 pub const RunTtyError = anyerror;
 
-pub fn runTty(ctx: *Ctx) RunTtyError!void {
+pub fn runDonut(ctx: *Ctx, args: *const ArgsResponse) RunTtyError!void {
     const rctx: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.heapAlloc };
 
     var trace = try Trace.init(rctx);
     defer trace.deinit(rctx);
 
-    var term: terminal.Terminal = try .init(rctx);
+    var term: terminal.Terminal = try .init(
+        rctx,
+        if (args.verb.?.donut.options.fullscreen != null)
+            .fullscreen
+        else
+            .{ .window = args.verb.?.donut.options.window.? },
+    );
     defer term.deinit(rctx);
 
     term.trace = &trace;
@@ -82,16 +101,17 @@ pub fn runTty(ctx: *Ctx) RunTtyError!void {
     const size = term.size;
 
     var grid: Grid = undefined;
-    try grid.init(size, ctx);
+    // TODO: force scroll to make room for windowed
+    try grid.init(term.startPos, size, ctx);
     defer grid.deinit(ctx);
 
-    try term.start(ctx.io);
-    defer term.stop(ctx.io) catch {};
+    try term.start(ctx.io, true);
+    defer term.stop(ctx.io, true) catch {};
 
     try trace.pushTimer(rctx);
-    for (0..size.rows) |row| {
-        for (0..size.cols) |col| {
-            grid.putCell(row, col, .{
+    for (0..size.rows) |y| {
+        for (0..size.cols) |x| {
+            grid.putCell(y, x, .{
                 .mode = .glyph,
                 .data = .{
                     .glyph = .{
@@ -112,4 +132,8 @@ pub fn runTty(ctx: *Ctx) RunTtyError!void {
     try Donut.run(ctx, &grid, &term);
 
     try trace.dump();
+}
+
+test {
+    _ = mArgs;
 }

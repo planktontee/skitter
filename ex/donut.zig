@@ -15,7 +15,7 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal) !void {
     var z: [1760]f32 = undefined;
 
     var frame: usize = 0;
-    while (frame < 30 * 60) : (frame += 1) {
+    while (frame < 10 * 60) : (frame += 1) {
         if (term.trace) |t| try t.pushTimer(context);
 
         @memset(&b, ' ');
@@ -54,18 +54,18 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal) !void {
         }
 
         // Render frame
-        var row: usize = 0;
-        while (row < 22) : (row += 1) {
-            for (0..80) |col| {
-                const char_val = b[row * 80 + col];
+        var y: usize = 0;
+        while (y < 22) : (y += 1) {
+            for (0..80) |x| {
+                const char_val = b[y * 80 + x];
 
                 // Calculate dynamic RGB waves based on grid position and frame time
                 // Adjust multipliers to change color frequency / speed
-                const r_wave = std.math.sin(@as(f32, @floatFromInt(row)) * 0.15 + @as(f32, @floatFromInt(frame)) * 0.05) * 127.0 + 128.0;
-                const g_wave = std.math.sin(@as(f32, @floatFromInt(col)) * 0.05 + @as(f32, @floatFromInt(frame)) * 0.03) * 127.0 + 128.0;
-                const b_wave = std.math.cos(@as(f32, @floatFromInt(row + col)) * 0.1 + @as(f32, @floatFromInt(frame)) * 0.04) * 127.0 + 128.0;
+                const r_wave = std.math.sin(@as(f32, @floatFromInt(y)) * 0.15 + @as(f32, @floatFromInt(frame)) * 0.05) * 127.0 + 128.0;
+                const g_wave = std.math.sin(@as(f32, @floatFromInt(x)) * 0.05 + @as(f32, @floatFromInt(frame)) * 0.03) * 127.0 + 128.0;
+                const b_wave = std.math.cos(@as(f32, @floatFromInt(y + x)) * 0.1 + @as(f32, @floatFromInt(frame)) * 0.04) * 127.0 + 128.0;
 
-                grid.putCell(row, col, .{
+                grid.putCell(y, x, .{
                     .mode = .trueColor,
                     .data = .{
                         .trueColor = .{

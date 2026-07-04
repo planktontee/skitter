@@ -2,7 +2,43 @@ const std = @import("std");
 const Writer = std.Io.Writer;
 
 pub fn moveCursor(w: *Writer, x: usize, y: usize) Writer.Error!void {
-    try w.print("\x1b[{d};{d}H", .{ x + 1, y + 1 });
+    try w.print("\x1b[{d};{d}H", .{ y + 1, x + 1 });
+}
+
+pub fn hideCursor() []const u8 {
+    return "\x1b[?25l";
+}
+
+pub fn showCursor() []const u8 {
+    return "\x1b[?25h";
+}
+
+pub fn alternateScreenBuffer() []const u8 {
+    return "\x1b[?1049h";
+}
+
+pub fn moveToMainBuffer() []const u8 {
+    return "\x1b[?1049l";
+}
+
+pub fn wipeEntireScreen() []const u8 {
+    return "\x1b[2J";
+}
+
+pub fn moveCursorToHome() []const u8 {
+    return "\x1b[H";
+}
+
+pub fn restoreCursor() []const u8 {
+    return "\x1b[u";
+}
+
+pub fn moveToNextLine() []const u8 {
+    return "\x1b[1E";
+}
+
+pub fn cleanFormat() []const u8 {
+    return "\x1b[0m";
 }
 
 pub const TermSeq = struct {
