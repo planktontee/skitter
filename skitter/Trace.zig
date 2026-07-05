@@ -4,6 +4,7 @@ const regent = @import("regent");
 pub const Metric = union(enum) {
     draw: Duration,
     sleep: Duration,
+    @"grid.loop": Duration,
     @"grid.buffer.size": usize,
     @"grid.full.size": usize,
     @"grid.full.serialize": Duration,

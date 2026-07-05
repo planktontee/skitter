@@ -129,7 +129,13 @@ pub fn runDonut(ctx: *Ctx, args: *const ArgsResponse) RunTtyError!void {
     try ctx.io.sleep(.fromMilliseconds(18), .awake);
     try trace.popTimer(rctx, .sleep);
 
-    try Donut.run(ctx, &grid, &term);
+    try Donut.run(
+        ctx,
+        &grid,
+        &term,
+        args.verb.?.donut.options.@"frames-by-second",
+        args.verb.?.donut.options.fps,
+    );
 
     try trace.dump();
 }

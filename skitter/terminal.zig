@@ -46,10 +46,18 @@ pub const Pos = struct {
     y: u16,
 };
 
+pub threadlocal var stopRun: bool = false;
+
+fn handleStop(sig: std.posix.SIG) callconv(.c) void {
+    switch (sig) {
+        std.posix.SIG.INT, std.posix.SIG.QUIT => stopRun = true,
+        else => {},
+    }
+}
+
 pub const Terminal = struct {
     fsIn: regent.fs.FileStream(.read),
     fsOut: regent.fs.FileStream(.write),
-    sigwinch: File,
     size: TermSize,
     trueSize: TermSize,
     trace: ?*Trace = null,
@@ -66,6 +74,7 @@ pub const Terminal = struct {
         regent.fs.OpenError ||
         std.Io.File.ReadStreamingError ||
         std.Io.File.Writer.Error ||
+        std.Io.Writer.Error ||
         std.fmt.ParseIntError ||
         GetTermSizeError ||
         rlinux.FcntlGetFLError ||
@@ -85,12 +94,22 @@ pub const Terminal = struct {
         const ttyIn = try cwd.openFile(context.io, "/dev/tty", .{ .mode = .read_write });
 
         const ttyOut = try cwd.openFile(context.io, "/dev/tty", .{ .mode = .write_only });
+        var fsOut = try regent.fs.FileStream(.write).openStreamWithConfig(
+            context,
+            ttyOut,
+            .{},
+            .byte,
+            .initSame(regent.units.ByteUnit.mb),
+            null,
+        );
 
         const beforeTtyAttr = try std.posix.tcgetattr(ttyIn.handle);
         var ttyAttr = beforeTtyAttr;
         configureTtyAttr(&ttyAttr);
 
         try std.posix.tcsetattr(ttyIn.handle, .FLUSH, ttyAttr);
+
+        try configureSignals();
 
         const trueSize = try getTermSize(ttyIn);
 
@@ -99,7 +118,7 @@ pub const Terminal = struct {
             .window => |w| try prepareWindow(
                 context,
                 ttyIn,
-                ttyOut,
+                &fsOut,
                 trueSize,
                 w,
                 null,
@@ -109,15 +128,7 @@ pub const Terminal = struct {
         return .{
             // TODO: test different buffer sizes later
             .fsIn = try regent.fs.FileStream(.read).openStream(context, ttyIn),
-            .fsOut = try regent.fs.FileStream(.write).openStreamWithConfig(
-                context,
-                ttyOut,
-                .{},
-                .byte,
-                .initSame(regent.units.ByteUnit.mb),
-                null,
-            ),
-            .sigwinch = try configureSignals(),
+            .fsOut = fsOut,
             .size = if (mode == .window) .{
                 .rows = mode.window.rows,
                 .cols = mode.window.cols,
@@ -129,12 +140,16 @@ pub const Terminal = struct {
         };
     }
 
+    pub fn isRunning() bool {
+        return !stopRun;
+    }
+
     // TODO: Move epoll syscalls to regent
     // TODO: prepare epoll for stdin for application use, not just this query
     fn prepareWindow(
         context: regent.ergo.Context,
         ttyIn: std.Io.File,
-        ttyOut: std.Io.File,
+        fsOut: *regent.fs.FileStream(.write),
         trueSize: TermSize,
         window: TermSize,
         sigmasks: ?*const std.os.linux.sigset_t,
@@ -207,36 +222,31 @@ pub const Terminal = struct {
         const n = try ttyIn.readStreaming(context.io, &.{&buf});
 
         if (n == 0) return error.BadCursorPositionQueryResponse;
-        var postR = buf[0..n];
+        var raw = buf[0..n];
 
         var pos: Pos = undefined;
         const header: []const u8 = "\x1b[";
-        if (!std.mem.startsWith(u8, postR, header)) return error.BadCursorPositionQueryResponse;
-        postR = postR[header.len..];
+        if (!std.mem.startsWith(u8, raw, header)) return error.BadCursorPositionQueryResponse;
+        raw = raw[header.len..];
 
-        if (std.mem.findScalar(u8, postR, ';')) |idxY| {
-            pos.y = (try std.fmt.parseInt(u8, postR[0..idxY], 10)) - 1;
-            postR = postR[idxY + 1 ..];
-            if (std.mem.findScalar(u8, postR, 'R')) |idxX| {
-                pos.x = (try std.fmt.parseInt(u8, postR[0..idxX], 10)) - 1;
+        if (std.mem.findScalar(u8, raw, ';')) |sepIdx| {
+            pos.y = (try std.fmt.parseInt(u8, raw[0..sepIdx], 10)) - 1;
+            raw = raw[sepIdx + 1 ..];
+            if (std.mem.findScalar(u8, raw, 'R')) |endIdx| {
+                pos.x = (try std.fmt.parseInt(u8, raw[0..endIdx], 10)) - 1;
             } else return error.BadCursorPositionQueryResponse;
         } else return error.BadCursorPositionQueryResponse;
 
         const delta = trueSize.rows - pos.y;
         if (delta < window.rows) {
             const newTarget = window.rows - delta;
-            try claimSpace(context, ttyOut, &pos, @intCast(newTarget));
+            for (0..newTarget) |_|
+                try fsOut.stream.interface.writeAll(comptime control.scrollDown());
+            try fsOut.stream.interface.flush();
+            pos.y -= @intCast(newTarget);
         }
 
         return pos;
-    }
-
-    fn claimSpace(context: regent.ergo.Context, ttyOut: std.Io.File, pos: *Pos, target: u16) !void {
-        const buf = try context.allocator.alloc(u8, target);
-        defer context.allocator.free(buf);
-        @memset(buf, '\n');
-        try ttyOut.writeStreamingAll(context.io, buf);
-        pos.y -= @intCast(target);
     }
 
     pub fn start(self: *const @This(), io: std.Io, comptime hideCursor: bool) std.Io.File.Writer.Error!void {
@@ -282,7 +292,6 @@ pub const Terminal = struct {
 
     pub fn deinit(self: *@This(), context: regent.ergo.Context) void {
         restoreSignals();
-        self.sigwinch.close(context.io);
         std.posix.tcsetattr(self.fsIn.stream.file.handle, .FLUSH, self.beforeTtyAttr) catch |e|
             if (is_debug)
                 std.debug.panic("Unable to restore tty attributes: {t}", .{e});
@@ -292,23 +301,22 @@ pub const Terminal = struct {
 
     pub const ConfigureSignalsError = @typeInfo(@typeInfo(@TypeOf(std.posix.signalfd)).@"fn".return_type.?).error_union.error_set;
 
-    fn configureSignals() ConfigureSignalsError!File {
-        var mask: std.posix.sigset_t = std.posix.sigemptyset();
-        std.posix.sigaddset(&mask, linux.SIG.WINCH);
-        // Block the signal from interrupting our process normally
-        std.posix.sigprocmask(linux.SIG.BLOCK, &mask, null);
-
-        return .{
-            .handle = try std.posix.signalfd(-1, &mask, 0),
-            .flags = .{ .nonblocking = true },
+    // TODO: move to event-based
+    fn configureSignals() ConfigureSignalsError!void {
+        var act: std.posix.Sigaction = .{
+            .handler = .{ .handler = handleStop },
+            .mask = std.posix.sigemptyset(),
+            .flags = std.posix.SA.RESTART,
         };
+
+        std.posix.sigaction(std.posix.SIG.INT, &act, null);
+        std.posix.sigaction(std.posix.SIG.QUIT, &act, null);
+        std.posix.sigaction(std.posix.SIG.WINCH, &act, null);
+        std.posix.sigaction(std.posix.SIG.TSTP, &act, null);
     }
 
-    fn restoreSignals() void {
-        var mask: std.posix.sigset_t = std.posix.sigemptyset();
-        std.posix.sigaddset(&mask, linux.SIG.WINCH);
-        std.posix.sigprocmask(linux.SIG.UNBLOCK, &mask, null);
-    }
+    // TODO: once we are event-based, this will be important
+    fn restoreSignals() void {}
 
     fn configureTtyAttr(ttyAttr: *linux.termios) void {
         ttyAttr.iflag.IXON = false;
@@ -328,7 +336,9 @@ pub const Terminal = struct {
         // print back input to output
         ttyAttr.lflag.ECHO = false;
         // disable all signals
-        ttyAttr.lflag.ISIG = false;
+        // TODO: enable this once we have event-based
+        // ttyAttr.lflag.ISIG = false;
+        ttyAttr.lflag.ISIG = true;
         // disable extended sequence handling
         ttyAttr.lflag.IEXTEN = false;
 

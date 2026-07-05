@@ -172,10 +172,13 @@ test "window codec test" {
 pub const DonutArgs = struct {
     fullscreen: ?bool = null,
     window: ?TermSize = null,
+    @"frames-by-second": usize = 60,
+    fps: u16 = 60,
 
     pub const Short = .{
         .w = .window,
         .f = .fullscreen,
+        .fR = .@"frames-by-second",
     };
 
     pub const Codec = CCodec;
@@ -192,6 +195,8 @@ pub const DonutArgs = struct {
         .optionsDescription = &.{
             .{ .field = .fullscreen, .description = "Claims entire tty screen. Either this or --window is required." },
             .{ .field = .window, .description = "Gives a window (HxW) size to draw the donut. Either this or --fullscreen is required." },
+            .{ .field = .@"frames-by-second", .description = "Number of frames by second to play." },
+            .{ .field = .fps, .typeHint = false, .defaultHint = false, .description = "FPS for the flush." },
         },
     };
 

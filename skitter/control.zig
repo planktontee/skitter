@@ -41,6 +41,10 @@ pub fn cleanFormat() []const u8 {
     return "\x1b[0m";
 }
 
+pub fn scrollDown() []const u8 {
+    return "\x1b[S";
+}
+
 pub const TermSeq = struct {
     started: bool = false,
 

@@ -6,7 +6,7 @@ const Ctx = @import("../skitter.zig").Ctx;
 const Trace = @import("../skitter/Trace.zig");
 const regent = @import("regent");
 
-pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal) !void {
+pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, framesBySecond: usize, fps: u16) !void {
     const context: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.heapAlloc };
     var A: f32 = 0.0;
     var B: f32 = 0.0;
@@ -15,7 +15,8 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal) !void {
     var z: [1760]f32 = undefined;
 
     var frame: usize = 0;
-    while (frame < 10 * 60) : (frame += 1) {
+    while (frame < framesBySecond * fps and Terminal.isRunning()) : (frame += 1) {
+        if (term.trace) |t| try t.pushTimer(context);
         if (term.trace) |t| try t.pushTimer(context);
 
         @memset(&b, ' ');
@@ -95,8 +96,15 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal) !void {
         A += 0.04;
         B += 0.02;
 
+        if (term.trace) |t| try t.popTimer(context, .@"grid.loop");
+
         if (term.trace) |t| try t.pushTimer(context);
-        try ctx.io.sleep(.fromMilliseconds(18), .awake);
+
+        // draw: 1.6 ms
+        // serialize: 689 micro
+        // flush: 64 micro
+        // -2.5ms is good enough
+        try ctx.io.sleep(.fromMicroseconds(@divTrunc(@as(i64, 1000 * 1000), @as(i64, @intCast(fps))) - 2500), .awake);
         if (term.trace) |t| try t.popTimer(context, .sleep);
     }
 }
