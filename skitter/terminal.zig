@@ -107,9 +107,8 @@ pub const Terminal = struct {
         var ttyAttr = beforeTtyAttr;
         configureTtyAttr(&ttyAttr);
 
-        try std.posix.tcsetattr(ttyIn.handle, .FLUSH, ttyAttr);
-
         try configureSignals();
+        try std.posix.tcsetattr(ttyIn.handle, .FLUSH, ttyAttr);
 
         const trueSize = try getTermSize(ttyIn);
 

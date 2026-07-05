@@ -7,99 +7,105 @@ const regent = @import("regent");
 const Cursor = regent.collections.Cursor;
 const TermSize = @import("terminal.zig").TermSize;
 
-const DonutCodec = zcasp.codec.ArgCodec(DonutArgs);
+pub fn TermSizeCodec(Spec: type) type {
+    return struct {
+        pub const Error = error{
+            ZeroSizeHeight,
+            ZeroSizeWidth,
+            SyntaxError,
+        } ||
+            BaseCodec.Error;
 
-pub const CCodec = struct {
-    pub const Error = error{
-        ZeroSizeHeight,
-        ZeroSizeWidth,
-        SyntaxError,
-    } ||
-        BaseCodec.Error;
+        const BaseCodec = codec.ArgCodec(Spec);
+        const SpecCodec = zcasp.codec.ArgCodec(Spec);
 
-    const BaseCodec = codec.ArgCodec(DonutArgs);
-
-    pub fn supports(comptime T: type, comptime _: DonutCodec.SpecFieldEnum) bool {
-        return T == TermSize;
-    }
-
-    const TermSizeState = enum {
-        init,
-        height,
-        separator,
-        widthStart,
-        width,
-    };
-
-    pub fn parseByType(
-        self: *@This(),
-        comptime T: type,
-        comptime tag: DonutCodec.SpecFieldEnum,
-        allocator: *const std.mem.Allocator,
-        cursor: *Cursor([]const u8),
-    ) Error!T {
-        if (T == TermSize) {
-            const s = cursor.peek() orelse return error.SyntaxError;
-            defer cursor.consume();
-
-            var w: TermSize = undefined;
-
-            var i: usize = 0;
-            loop: switch (@as(TermSizeState, .init)) {
-                .init => {
-                    if (i >= s.len) return error.SyntaxError;
-
-                    switch (s[i]) {
-                        '0' => return error.ZeroSizeHeight,
-                        '1'...'9' => continue :loop .height,
-                        else => return error.SyntaxError,
-                    }
-                },
-                .height => {
-                    digit: while (i < s.len) : (i += 1) {
-                        switch (s[i]) {
-                            '0'...'9' => continue :digit,
-                            'x' => {
-                                w.rows = try std.fmt.parseInt(u16, s[0..i], 10);
-                                continue :loop .separator;
-                            },
-                            else => return error.SyntaxError,
-                        }
-                    }
-                    return error.SyntaxError;
-                },
-                .separator => {
-                    i += 1;
-                    continue :loop .widthStart;
-                },
-                .widthStart => {
-                    if (i >= s.len) return error.SyntaxError;
-
-                    switch (s[i]) {
-                        '0' => return error.ZeroSizeWidth,
-                        '1'...'9' => continue :loop .width,
-                        else => return error.SyntaxError,
-                    }
-                },
-                .width => {
-                    // we are here: <height>x<_>, and _ is guaranteed non-zero (from .widthStart)
-                    const start = i;
-                    digit: while (i < s.len) : (i += 1) {
-                        switch (s[i]) {
-                            '0'...'9' => continue :digit,
-                            else => return error.SyntaxError,
-                        }
-                    }
-                    w.cols = try std.fmt.parseInt(u16, s[start..], 10);
-                    return w;
-                },
-            }
-            unreachable;
-        } else {
-            return try BaseCodec.parseByType(self, T, tag, allocator, cursor);
+        pub fn supports(comptime T: type, comptime _: SpecCodec.SpecFieldEnum) bool {
+            return T == TermSize;
         }
-    }
+
+        pub fn parseByType(
+            self: *@This(),
+            comptime T: type,
+            comptime tag: SpecCodec.SpecFieldEnum,
+            allocator: *const std.mem.Allocator,
+            cursor: *Cursor([]const u8),
+        ) Error!T {
+            if (T == TermSize) {
+                return try parseTermSize(cursor);
+            } else {
+                return try BaseCodec.parseByType(self, T, tag, allocator, cursor);
+            }
+        }
+    };
+}
+
+const TermSizeState = enum {
+    init,
+    height,
+    separator,
+    widthStart,
+    width,
 };
+
+fn parseTermSize(
+    cursor: *Cursor([]const u8),
+) !TermSize {
+    const s = cursor.peek() orelse return error.SyntaxError;
+    defer cursor.consume();
+
+    var w: TermSize = undefined;
+
+    var i: usize = 0;
+    loop: switch (@as(TermSizeState, .init)) {
+        .init => {
+            if (i >= s.len) return error.SyntaxError;
+
+            switch (s[i]) {
+                '0' => return error.ZeroSizeHeight,
+                '1'...'9' => continue :loop .height,
+                else => return error.SyntaxError,
+            }
+        },
+        .height => {
+            digit: while (i < s.len) : (i += 1) {
+                switch (s[i]) {
+                    '0'...'9' => continue :digit,
+                    'x' => {
+                        w.rows = try std.fmt.parseInt(u16, s[0..i], 10);
+                        continue :loop .separator;
+                    },
+                    else => return error.SyntaxError,
+                }
+            }
+            return error.SyntaxError;
+        },
+        .separator => {
+            i += 1;
+            continue :loop .widthStart;
+        },
+        .widthStart => {
+            if (i >= s.len) return error.SyntaxError;
+
+            switch (s[i]) {
+                '0' => return error.ZeroSizeWidth,
+                '1'...'9' => continue :loop .width,
+                else => return error.SyntaxError,
+            }
+        },
+        .width => {
+            // we are here: <height>x<_>, and _ is guaranteed non-zero (from .widthStart)
+            const start = i;
+            digit: while (i < s.len) : (i += 1) {
+                switch (s[i]) {
+                    '0'...'9' => continue :digit,
+                    else => return error.SyntaxError,
+                }
+            }
+            w.cols = try std.fmt.parseInt(u16, s[start..], 10);
+            return w;
+        },
+    }
+}
 
 test "window codec test" {
     const testing = std.testing;
@@ -121,7 +127,7 @@ test "window codec test" {
         .i = 0,
     };
     var cursor = c.asCursor();
-    var wCodec: CCodec = .{};
+    var wCodec: TermSizeCodec(DonutArgs) = .{};
 
     try testing.expectEqualDeep(
         TermSize{ .rows = 80, .cols = 20 },
@@ -181,7 +187,7 @@ pub const DonutArgs = struct {
         .fR = .@"frames-by-second",
     };
 
-    pub const Codec = CCodec;
+    pub const Codec = TermSizeCodec(@This());
 
     pub const Positionals = positionals.EmptyPositionalsOf;
 
@@ -210,7 +216,38 @@ pub const DonutArgs = struct {
     };
 };
 
-pub const TailArgs = struct {};
+pub const TailArgs = struct {
+    fullscreen: ?bool = null,
+    window: ?TermSize = null,
+
+    pub const Short = .{
+        .w = .window,
+        .f = .fullscreen,
+    };
+
+    pub const Codec = TermSizeCodec(@This());
+
+    pub const Help: help.HelpData(@This()) = .{
+        .usage = &.{"skitter tail <options>"},
+        .description = "Tails file or stdin",
+        .examples = &.{
+            "skitter tail -w 40x80",
+        },
+        .optionsDescription = &.{
+            .{ .field = .fullscreen, .description = "Claims entire tty screen. Either this or --window is required." },
+            .{ .field = .window, .description = "Gives a window (HxW) size to poll file/stdin. Either this or --fullscreen is required." },
+        },
+    };
+
+    fn validateArgs(fbset: zcasp.validate.FieldBitSet(@This())) zcasp.validate.Error!void {
+        if (fbset.allOf(.{ .fullscreen, .window })) return error.MutuallyExclusiveArgsPresent;
+        if (!fbset.oneOf(.{ .fullscreen, .window })) return error.RequiredArgsMissing;
+    }
+
+    pub const GroupMatch: zcasp.validate.GroupMatchConfig(@This()) = .{
+        .validateFn = @This().validateArgs,
+    };
+};
 
 pub const Args = struct {
     pub const Verb = union(enum) {

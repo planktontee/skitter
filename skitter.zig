@@ -10,6 +10,7 @@ const Donut = @import("ex/donut.zig");
 const Trace = @import("skitter/Trace.zig");
 const mArgs = @import("skitter/args.zig");
 const ArgsResponse = mArgs.ArgsResponse;
+const Tail = @import("ex/tail.zig");
 
 const DebugAlloctor = std.heap.DebugAllocator(.{});
 
@@ -75,13 +76,42 @@ pub fn trampMain(args: struct { ?Allocator, *Ctx, std.process.Init.Minimal }) !v
         return parseError.err;
     }
 
-    if (argsRes.verb.? == .donut)
-        try runDonut(ctx, &argsRes);
+    switch (argsRes.verb.?) {
+        .donut => try runDonut(ctx, &argsRes),
+        .tail => try runTail(ctx, &argsRes),
+    }
 }
 
-pub const RunTtyError = anyerror;
+pub fn runTail(ctx: *Ctx, args: *const ArgsResponse) !void {
+    const rctx: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.heapAlloc };
 
-pub fn runDonut(ctx: *Ctx, args: *const ArgsResponse) RunTtyError!void {
+    var trace = try Trace.init(rctx);
+    defer trace.deinit(rctx);
+
+    var term: terminal.Terminal = try .init(
+        rctx,
+        if (args.verb.?.tail.options.fullscreen != null)
+            .fullscreen
+        else
+            .{ .window = args.verb.?.tail.options.window.? },
+    );
+    defer term.deinit(rctx);
+
+    term.trace = &trace;
+
+    const size = term.size;
+
+    var grid: Grid = undefined;
+    try grid.init(term.startPos, size, ctx);
+    defer grid.deinit(ctx);
+
+    try term.start(ctx.io, true);
+    defer term.stop(ctx.io, true) catch {};
+
+    try Tail.run(ctx, &grid, &term, args.verb.?.tail.positionals.reminder);
+}
+
+pub fn runDonut(ctx: *Ctx, args: *const ArgsResponse) !void {
     const rctx: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.heapAlloc };
 
     var trace = try Trace.init(rctx);
@@ -101,7 +131,6 @@ pub fn runDonut(ctx: *Ctx, args: *const ArgsResponse) RunTtyError!void {
     const size = term.size;
 
     var grid: Grid = undefined;
-    // TODO: force scroll to make room for windowed
     try grid.init(term.startPos, size, ctx);
     defer grid.deinit(ctx);
 
