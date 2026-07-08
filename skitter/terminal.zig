@@ -11,8 +11,8 @@ const Window = @import("args.zig").Window;
 const control = @import("control.zig");
 
 pub const TermSize = struct {
-    rows: usize,
     cols: usize,
+    rows: usize,
 };
 
 pub const GetTermSizeError = error{
@@ -242,7 +242,7 @@ pub const Terminal = struct {
             for (0..newTarget) |_|
                 try fsOut.stream.interface.writeAll(comptime control.scrollDown());
             try fsOut.stream.interface.flush();
-            pos.y -= @intCast(newTarget);
+            pos.y -|= @intCast(newTarget);
         }
 
         return pos;

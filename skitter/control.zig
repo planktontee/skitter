@@ -45,7 +45,7 @@ pub fn scrollDown() []const u8 {
     return "\x1b[S";
 }
 
-pub const TermSeq = struct {
+pub const TermStyleSeq = struct {
     started: bool = false,
 
     pub fn nextToken(self: *@This(), w: *Writer) !void {

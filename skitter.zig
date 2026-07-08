@@ -137,27 +137,6 @@ pub fn runDonut(ctx: *Ctx, args: *const ArgsResponse) !void {
     try term.start(ctx.io, true);
     defer term.stop(ctx.io, true) catch {};
 
-    try trace.pushTimer(rctx);
-    for (0..size.rows) |y| {
-        for (0..size.cols) |x| {
-            grid.putCell(y, x, .{
-                .mode = .glyph,
-                .data = .{
-                    .glyph = .{
-                        .char = ' ',
-                    },
-                },
-            });
-        }
-    }
-    try trace.popTimer(rctx, .draw);
-
-    try grid.flush(ctx, &term);
-
-    try trace.pushTimer(rctx);
-    try ctx.io.sleep(.fromMilliseconds(18), .awake);
-    try trace.popTimer(rctx, .sleep);
-
     try Donut.run(
         ctx,
         &grid,

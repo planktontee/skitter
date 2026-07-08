@@ -41,10 +41,10 @@ pub fn TermSizeCodec(Spec: type) type {
 
 const TermSizeState = enum {
     init,
-    height,
-    separator,
-    widthStart,
     width,
+    separator,
+    heightStart,
+    height,
 };
 
 fn parseTermSize(
@@ -61,17 +61,17 @@ fn parseTermSize(
             if (i >= s.len) return error.SyntaxError;
 
             switch (s[i]) {
-                '0' => return error.ZeroSizeHeight,
-                '1'...'9' => continue :loop .height,
+                '0' => return error.ZeroSizeWidth,
+                '1'...'9' => continue :loop .width,
                 else => return error.SyntaxError,
             }
         },
-        .height => {
+        .width => {
             digit: while (i < s.len) : (i += 1) {
                 switch (s[i]) {
                     '0'...'9' => continue :digit,
                     'x' => {
-                        w.rows = try std.fmt.parseInt(u16, s[0..i], 10);
+                        w.cols = try std.fmt.parseInt(u16, s[0..i], 10);
                         continue :loop .separator;
                     },
                     else => return error.SyntaxError,
@@ -81,18 +81,18 @@ fn parseTermSize(
         },
         .separator => {
             i += 1;
-            continue :loop .widthStart;
+            continue :loop .heightStart;
         },
-        .widthStart => {
+        .heightStart => {
             if (i >= s.len) return error.SyntaxError;
 
             switch (s[i]) {
-                '0' => return error.ZeroSizeWidth,
-                '1'...'9' => continue :loop .width,
+                '0' => return error.ZeroSizeHeight,
+                '1'...'9' => continue :loop .height,
                 else => return error.SyntaxError,
             }
         },
-        .width => {
+        .height => {
             // we are here: <height>x<_>, and _ is guaranteed non-zero (from .widthStart)
             const start = i;
             digit: while (i < s.len) : (i += 1) {
@@ -101,7 +101,7 @@ fn parseTermSize(
                     else => return error.SyntaxError,
                 }
             }
-            w.cols = try std.fmt.parseInt(u16, s[start..], 10);
+            w.rows = try std.fmt.parseInt(u16, s[start..], 10);
             return w;
         },
     }
@@ -130,28 +130,8 @@ test "window codec test" {
     var wCodec: TermSizeCodec(DonutArgs) = .{};
 
     try testing.expectEqualDeep(
-        TermSize{ .rows = 80, .cols = 20 },
+        TermSize{ .cols = 80, .rows = 20 },
         try wCodec.parseByType(TermSize, .window, &testing.allocator, &cursor),
-    );
-    try testing.expectError(
-        error.SyntaxError,
-        wCodec.parseByType(TermSize, .window, &testing.allocator, &cursor),
-    );
-    try testing.expectError(
-        error.ZeroSizeHeight,
-        wCodec.parseByType(TermSize, .window, &testing.allocator, &cursor),
-    );
-    try testing.expectError(
-        error.SyntaxError,
-        wCodec.parseByType(TermSize, .window, &testing.allocator, &cursor),
-    );
-    try testing.expectError(
-        error.SyntaxError,
-        wCodec.parseByType(TermSize, .window, &testing.allocator, &cursor),
-    );
-    try testing.expectError(
-        error.SyntaxError,
-        wCodec.parseByType(TermSize, .window, &testing.allocator, &cursor),
     );
     try testing.expectError(
         error.SyntaxError,
@@ -165,8 +145,28 @@ test "window codec test" {
         error.SyntaxError,
         wCodec.parseByType(TermSize, .window, &testing.allocator, &cursor),
     );
+    try testing.expectError(
+        error.SyntaxError,
+        wCodec.parseByType(TermSize, .window, &testing.allocator, &cursor),
+    );
+    try testing.expectError(
+        error.SyntaxError,
+        wCodec.parseByType(TermSize, .window, &testing.allocator, &cursor),
+    );
+    try testing.expectError(
+        error.SyntaxError,
+        wCodec.parseByType(TermSize, .window, &testing.allocator, &cursor),
+    );
+    try testing.expectError(
+        error.ZeroSizeHeight,
+        wCodec.parseByType(TermSize, .window, &testing.allocator, &cursor),
+    );
+    try testing.expectError(
+        error.SyntaxError,
+        wCodec.parseByType(TermSize, .window, &testing.allocator, &cursor),
+    );
     try testing.expectEqualDeep(
-        TermSize{ .rows = 1, .cols = 1 },
+        TermSize{ .cols = 1, .rows = 1 },
         try wCodec.parseByType(TermSize, .window, &testing.allocator, &cursor),
     );
     try testing.expectError(
@@ -200,7 +200,7 @@ pub const DonutArgs = struct {
         },
         .optionsDescription = &.{
             .{ .field = .fullscreen, .description = "Claims entire tty screen. Either this or --window is required." },
-            .{ .field = .window, .description = "Gives a window (HxW) size to draw the donut. Either this or --fullscreen is required." },
+            .{ .field = .window, .description = "Gives a window (WxH) size to draw the donut. Either this or --fullscreen is required." },
             .{ .field = .@"frames-by-second", .description = "Number of frames by second to play." },
             .{ .field = .fps, .typeHint = false, .defaultHint = false, .description = "FPS for the flush." },
         },
@@ -235,7 +235,7 @@ pub const TailArgs = struct {
         },
         .optionsDescription = &.{
             .{ .field = .fullscreen, .description = "Claims entire tty screen. Either this or --window is required." },
-            .{ .field = .window, .description = "Gives a window (HxW) size to poll file/stdin. Either this or --fullscreen is required." },
+            .{ .field = .window, .description = "Gives a window (WxH) size to poll file/stdin. Either this or --fullscreen is required." },
         },
     };
 

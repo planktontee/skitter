@@ -7,8 +7,6 @@ const Trace = @import("../skitter/Trace.zig");
 const regent = @import("regent");
 
 pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, fPath: ?[]const []const u8) !void {
-    // TODO: setup no-sleep on suspend
-
     const path = if (fPath) |p|
         p[0]
     else
@@ -42,7 +40,7 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, fPath: ?[]const []const u8) 
             var skipX: bool = false;
             for (0..term.size.cols) |x| {
                 if (skipX or i >= buff.len) {
-                    grid.putCell(y, x, .{
+                    grid.putCell(x, y, .{
                         .mode = .glyph,
                         .data = .{ .glyph = @bitCast(@as(u124, @intCast(' '))) },
                     });
@@ -50,7 +48,7 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, fPath: ?[]const []const u8) 
                 }
                 if (buff[i] == '\n') {
                     skipX = true;
-                    grid.putCell(y, x, .{
+                    grid.putCell(x, y, .{
                         .mode = .glyph,
                         .data = .{ .glyph = @bitCast(@as(u124, @intCast(' '))) },
                     });
@@ -58,7 +56,7 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, fPath: ?[]const []const u8) 
                     continue;
                 }
                 // TODO: utf8
-                grid.putCell(y, x, .{
+                grid.putCell(x, y, .{
                     .mode = .glyph,
                     .data = .{ .glyph = @bitCast(@as(u124, @intCast(buff[i]))) },
                 });
@@ -91,7 +89,7 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, fPath: ?[]const []const u8) 
         for (0..term.size.cols) |x| {
             const y = term.size.rows - 1;
             if (skipX or i >= buff.len) {
-                grid.putCell(y, x, .{
+                grid.putCell(x, y, .{
                     .mode = .glyph,
                     .data = .{ .glyph = @bitCast(@as(u124, @intCast(' '))) },
                 });
@@ -99,7 +97,7 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, fPath: ?[]const []const u8) 
             }
             if (buff[i] == '\n') {
                 skipX = true;
-                grid.putCell(y, x, .{
+                grid.putCell(x, y, .{
                     .mode = .glyph,
                     .data = .{ .glyph = @bitCast(@as(u124, @intCast(' '))) },
                 });
@@ -107,7 +105,7 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, fPath: ?[]const []const u8) 
                 continue;
             }
             // TODO: utf8
-            grid.putCell(y, x, .{
+            grid.putCell(x, y, .{
                 .mode = .glyph,
                 .data = .{ .glyph = @bitCast(@as(u124, @intCast(buff[i]))) },
             });

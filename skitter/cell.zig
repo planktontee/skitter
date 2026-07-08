@@ -1,5 +1,6 @@
 const std = @import("std");
-const TermSeq = @import("control.zig").TermSeq;
+const TermStyleSeq = @import("control.zig").TermStyleSeq;
+const control = @import("control.zig");
 
 pub const CellMode = enum(u4) {
     skip = 0,
@@ -24,32 +25,35 @@ pub const Style = packed struct(u8) {
     hidden: bool = false,
     strike: bool = false,
 
-    pub fn writeStyle(self: @This(), w: *std.Io.Writer) !void {
-        var seq: TermSeq = .{};
+    pub fn writeDiff(to: @This(), w: *std.Io.Writer, seq: *TermStyleSeq, from: @This()) !void {
+        const boldOff = from.bold and !to.bold;
+        const dimOff = from.dim and !to.dim;
+        if (boldOff or dimOff) {
+            try seq.write(w, "22");
+            if (to.bold) try seq.writeByte(w, '1');
+            if (to.dim) try seq.writeByte(w, '2');
+        } else {
+            if (!from.bold and to.bold) try seq.writeByte(w, '1');
+            if (!from.dim and to.dim) try seq.writeByte(w, '2');
+        }
 
-        if (self.bold)
-            try seq.writeByte(w, '1');
+        inline for (.{
+            .{ "italic", '3', "23" },
+            .{ "underline", '4', "24" },
+            .{ "blink", '5', "25" },
+            .{ "reverseColors", '7', "27" },
+            .{ "hidden", '8', "28" },
+            .{ "strike", '9', "29" },
+        }) |spec| {
+            const field = spec.@"0";
+            const on = spec.@"1";
+            const off = spec.@"2";
 
-        if (self.dim)
-            try seq.writeByte(w, '2');
-
-        if (self.italic)
-            try seq.writeByte(w, '3');
-
-        if (self.underline)
-            try seq.writeByte(w, '4');
-
-        if (self.blink)
-            try seq.writeByte(w, '5');
-
-        if (self.reverseColors)
-            try seq.writeByte(w, '7');
-
-        if (self.hidden)
-            try seq.writeByte(w, '8');
-
-        if (self.strike)
-            try seq.writeByte(w, '9');
+            if (@field(from, field) and !@field(to, field))
+                try seq.write(w, off)
+            else if (!@field(from, field) and @field(to, field))
+                try seq.writeByte(w, on);
+        }
     }
 };
 
@@ -201,6 +205,10 @@ pub const RGB = packed struct(u24) {
     b: u8,
     g: u8,
     r: u8,
+
+    pub fn write(self: @This(), w: *std.Io.Writer) !void {
+        try w.print("{d};{d};{d}", .{ self.r, self.g, self.b });
+    }
 };
 
 pub const UnderlineDecoration = enum(u3) {
@@ -210,6 +218,14 @@ pub const UnderlineDecoration = enum(u3) {
     wavy,
     dotted,
     dashed,
+
+    pub fn writeDiff(to: @This(), w: *std.Io.Writer, seq: *TermStyleSeq, from: @This()) !void {
+        if (to != from)
+            if (to == .none)
+                try seq.write(w, "4:0")
+            else
+                try seq.print(w, "4:{d}", .{@intFromEnum(to)});
+    }
 };
 
 pub const FlaggedTrueColor = packed struct(u25) {
@@ -236,6 +252,90 @@ pub const ImageRootCell = packed struct(u124) {
 
 pub const SkipCell = packed struct(u124) {
     _: u124 = 0,
+};
+
+pub fn FmtColor(isBg: bool) type {
+    return union(enum) {
+        default,
+        ansi: AnsiColor,
+        rgb: RGB,
+
+        pub fn eql(a: @This(), b: @This()) bool {
+            if (@as(std.meta.Tag(@This()), a) != @as(std.meta.Tag(@This()), b)) return false;
+            return switch (a) {
+                .default => true,
+                .ansi => |c| @as(u8, @bitCast(c)) == @as(u8, @bitCast(b.ansi)),
+                .rgb => |c| @as(u24, @bitCast(c)) == @as(u24, @bitCast(b.rgb)),
+            };
+        }
+
+        pub fn writeDiff(
+            to: @This(),
+            w: *std.Io.Writer,
+            seq: *TermStyleSeq,
+            from: @This(),
+        ) !void {
+            if (!to.eql(from)) {
+                switch (to) {
+                    .default => try seq.write(w, "39"),
+                    .ansi => |color| {
+                        try seq.nextToken(w);
+                        try color.write(isBg, w);
+                    },
+                    .rgb => |rgb| {
+                        try seq.write(w, (if (isBg) "48" else "38" ++ ";2;"));
+                        try rgb.write(w);
+                    },
+                }
+            }
+        }
+    };
+}
+
+pub const UnderlineColorFmt = union(enum) {
+    none,
+    rgb: RGB,
+
+    pub fn eql(self: @This(), other: @This()) bool {
+        if (std.meta.activeTag(self) != std.meta.activeTag(other)) return false;
+        return switch (self) {
+            .none => true,
+            .rgb => |color| color == other.rgb,
+        };
+    }
+
+    pub fn writeDiff(to: @This(), w: *std.Io.Writer, seq: *TermStyleSeq, from: @This()) !void {
+        if (!to.eql(from))
+            switch (to) {
+                .none => try seq.write(w, "58"),
+                .rgb => |rgb| {
+                    try seq.write(w, "58;2;");
+                    try rgb.write(w);
+                },
+            };
+    }
+};
+
+pub const CellFmt = struct {
+    style: Style = @bitCast(@as(u8, 0)),
+    fg: FmtColor(false) = .default,
+    bg: FmtColor(true) = .default,
+    udDeco: UnderlineDecoration = .none,
+    udColor: UnderlineColorFmt = .none,
+
+    pub fn writeCharWithDiff(to: *const @This(), w: *std.Io.Writer, from: *const @This(), char: u21) !void {
+        var seq: control.TermStyleSeq = .{};
+
+        try to.style.writeDiff(w, &seq, from.style);
+        try to.fg.writeDiff(w, &seq, from.fg);
+        try to.bg.writeDiff(w, &seq, from.bg);
+        try to.udDeco.writeDiff(w, &seq, from.udDeco);
+        try to.udColor.writeDiff(w, &seq, from.udColor);
+
+        try seq.finish(w);
+
+        try w.print("{u}", .{char});
+    }
 };
 
 pub const CellData = packed union {
