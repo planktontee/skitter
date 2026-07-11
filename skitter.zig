@@ -76,76 +76,43 @@ pub fn trampMain(args: struct { ?Allocator, *Ctx, std.process.Init.Minimal }) !v
         return parseError.err;
     }
 
+    const rctx: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.heapAlloc };
+
+    var trace = try Trace.init(rctx);
+    defer trace.deinit(rctx);
+
+    var term: terminal.Terminal = try .init(
+        rctx,
+        switch (argsRes.verb.?) {
+            inline else => |opt| if (opt.options.fullscreen != null)
+                .fullscreen
+            else
+                .{ .window = opt.options.window.? },
+        },
+    );
+    defer term.deinit(rctx);
+
+    term.trace = &trace;
+
+    const size = term.size;
+
+    var grid: Grid = undefined;
+    try grid.init(term.startPos, size, ctx);
+    defer grid.deinit(ctx);
+
+    try term.start(ctx.io, true);
+    defer term.stop(ctx.io, true) catch {};
+
     switch (argsRes.verb.?) {
-        .donut => try runDonut(ctx, &argsRes),
-        .tail => try runTail(ctx, &argsRes),
+        .donut => try Donut.run(
+            ctx,
+            &grid,
+            &term,
+            argsRes.verb.?.donut.options.@"frames-by-second",
+            argsRes.verb.?.donut.options.fps,
+        ),
+        .tail => try Tail.run(ctx, &grid, &term, argsRes.verb.?.tail.positionals.reminder),
     }
-}
-
-pub fn runTail(ctx: *Ctx, args: *const ArgsResponse) !void {
-    const rctx: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.heapAlloc };
-
-    var trace = try Trace.init(rctx);
-    defer trace.deinit(rctx);
-
-    var term: terminal.Terminal = try .init(
-        rctx,
-        if (args.verb.?.tail.options.fullscreen != null)
-            .fullscreen
-        else
-            .{ .window = args.verb.?.tail.options.window.? },
-    );
-    defer term.deinit(rctx);
-
-    term.trace = &trace;
-
-    const size = term.size;
-
-    var grid: Grid = undefined;
-    try grid.init(term.startPos, size, ctx);
-    defer grid.deinit(ctx);
-
-    try term.start(ctx.io, true);
-    defer term.stop(ctx.io, true) catch {};
-
-    try Tail.run(ctx, &grid, &term, args.verb.?.tail.positionals.reminder);
-}
-
-pub fn runDonut(ctx: *Ctx, args: *const ArgsResponse) !void {
-    const rctx: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.heapAlloc };
-
-    var trace = try Trace.init(rctx);
-    defer trace.deinit(rctx);
-
-    var term: terminal.Terminal = try .init(
-        rctx,
-        if (args.verb.?.donut.options.fullscreen != null)
-            .fullscreen
-        else
-            .{ .window = args.verb.?.donut.options.window.? },
-    );
-    defer term.deinit(rctx);
-
-    term.trace = &trace;
-
-    const size = term.size;
-
-    var grid: Grid = undefined;
-    try grid.init(term.startPos, size, ctx);
-    defer grid.deinit(ctx);
-
-    try term.start(ctx.io, true);
-    defer term.stop(ctx.io, true) catch {};
-
-    try Donut.run(
-        ctx,
-        &grid,
-        &term,
-        args.verb.?.donut.options.@"frames-by-second",
-        args.verb.?.donut.options.fps,
-    );
-
-    try trace.dump();
 }
 
 test {

@@ -8,6 +8,17 @@ pub const CellMode = enum(u4) {
     ansi,
     trueColor,
     imgRoot,
+
+    pub fn concreteType(self: @This()) type {
+        return switch (self) {
+            .skip => void,
+            .glyph => u21,
+            .ansi => AnsiCell,
+            .trueColor => TrueColorCell,
+            .imgRoot,
+            => void,
+        };
+    }
 };
 
 pub const GlyphCell = packed struct(u124) {
@@ -235,14 +246,14 @@ pub const FlaggedTrueColor = packed struct(u25) {
 
 pub const TrueColorCell = packed struct(u124) {
     char: u21,
-    style: Style,
-    fg: RGB,
-    fgDefault: bool,
-    bg: RGB,
-    bgDefault: bool,
-    underlineStyle: UnderlineDecoration,
-    underline: RGB,
-    underlineDefault: bool,
+    style: Style = @bitCast(@as(u8, 0)),
+    fg: RGB = @bitCast(@as(u24, 0)),
+    fgDefault: bool = true,
+    bg: RGB = @bitCast(@as(u24, 0)),
+    bgDefault: bool = true,
+    underlineStyle: UnderlineDecoration = .none,
+    underline: RGB = @bitCast(@as(u24, 0)),
+    underlineDefault: bool = true,
     _: u17 = 0,
 };
 

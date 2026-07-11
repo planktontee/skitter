@@ -58,33 +58,22 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, framesBySecond: usize, fps: 
         var y: usize = 0;
         while (y < 22) : (y += 1) {
             for (0..80) |x| {
-                const char_val = b[y * 80 + x];
+                const c = b[y * 80 + x];
 
                 // Calculate dynamic RGB waves based on grid position and frame time
                 // Adjust multipliers to change color frequency / speed
-                const r_wave = std.math.sin(@as(f32, @floatFromInt(y)) * 0.15 + @as(f32, @floatFromInt(frame)) * 0.05) * 127.0 + 128.0;
-                const g_wave = std.math.sin(@as(f32, @floatFromInt(x)) * 0.05 + @as(f32, @floatFromInt(frame)) * 0.03) * 127.0 + 128.0;
-                const b_wave = std.math.cos(@as(f32, @floatFromInt(y + x)) * 0.1 + @as(f32, @floatFromInt(frame)) * 0.04) * 127.0 + 128.0;
+                const rWave = std.math.sin(@as(f32, @floatFromInt(y)) * 0.15 + @as(f32, @floatFromInt(frame)) * 0.05) * 127.0 + 128.0;
+                const gWave = std.math.sin(@as(f32, @floatFromInt(x)) * 0.05 + @as(f32, @floatFromInt(frame)) * 0.03) * 127.0 + 128.0;
+                const bWave = std.math.cos(@as(f32, @floatFromInt(y + x)) * 0.1 + @as(f32, @floatFromInt(frame)) * 0.04) * 127.0 + 128.0;
 
-                grid.putCell(x, y, .{
-                    .mode = .trueColor,
-                    .data = .{
-                        .trueColor = .{
-                            .char = char_val,
-                            .style = @bitCast(@as(u8, 0)),
-                            .fg = .{
-                                .r = @intFromFloat(r_wave),
-                                .g = @intFromFloat(g_wave),
-                                .b = @intFromFloat(b_wave),
-                            },
-                            .bg = .{ .r = 0, .g = 0, .b = 0 },
-                            .underline = .{ .r = 0, .g = 0, .b = 0 },
-                            .fgDefault = false,
-                            .bgDefault = true,
-                            .underlineDefault = true,
-                            .underlineStyle = .none,
-                        },
+                grid.put(x, y, .trueColor, .{
+                    .char = c,
+                    .fg = .{
+                        .r = @intFromFloat(rWave),
+                        .g = @intFromFloat(gWave),
+                        .b = @intFromFloat(bWave),
                     },
+                    .fgDefault = false,
                 });
             }
         }

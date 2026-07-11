@@ -25,93 +25,47 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, fPath: ?[]const []const u8) 
     const r = &fs.stream.interface;
 
     var linesFilled: usize = 0;
-    // Both passes assume fill will fill > grid
+    var cursor: regent.fs.Utf8Cursor = .{ .reader = r };
 
     // first pass fils the grid
     while (Terminal.isRunning()) {
-        r.fill(1) catch |e| switch (e) {
-            error.EndOfStream => return,
-            error.ReadFailed => return e,
-        };
-
-        const buff = r.buffered();
-        var i: usize = 0;
         for (linesFilled..term.size.rows) |y| {
-            var skipX: bool = false;
             for (0..term.size.cols) |x| {
-                if (skipX or i >= buff.len) {
-                    grid.putCell(x, y, .{
-                        .mode = .glyph,
-                        .data = .{ .glyph = @bitCast(@as(u124, @intCast(' '))) },
-                    });
-                    continue;
+                const optC = try cursor.next();
+
+                if (optC == null or optC.? == '\n') {
+                    grid.splatRow(x, y, .glyph, ' ');
+                    break;
                 }
-                if (buff[i] == '\n') {
-                    skipX = true;
-                    grid.putCell(x, y, .{
-                        .mode = .glyph,
-                        .data = .{ .glyph = @bitCast(@as(u124, @intCast(' '))) },
-                    });
-                    i += 1;
-                    continue;
-                }
-                // TODO: utf8
-                grid.putCell(x, y, .{
-                    .mode = .glyph,
-                    .data = .{ .glyph = @bitCast(@as(u124, @intCast(buff[i]))) },
-                });
-                i += 1;
+
+                grid.put(x, y, .glyph, optC.?);
             }
             linesFilled += 1;
-            if (i >= buff.len) break;
         }
-        r.toss(i);
         try grid.flush(ctx, term);
         if (linesFilled == term.size.rows) break;
     }
 
     // further passes shift
-    while (Terminal.isRunning()) {
-        r.fill(1) catch |e| switch (e) {
-            error.EndOfStream => break,
-            error.ReadFailed => return e,
-        };
-        var i: usize = 0;
-        const buff = r.buffered();
-
-        const targetSize: usize = term.size.cols * term.size.rows - term.size.cols;
-        @memmove(
-            grid.bChar[0..targetSize],
-            grid.bChar[term.size.cols..],
-        );
-
-        var skipX: bool = false;
+    tail: while (Terminal.isRunning()) {
+        var needScroll: bool = true;
         for (0..term.size.cols) |x| {
             const y = term.size.rows - 1;
-            if (skipX or i >= buff.len) {
-                grid.putCell(x, y, .{
-                    .mode = .glyph,
-                    .data = .{ .glyph = @bitCast(@as(u124, @intCast(' '))) },
-                });
-                continue;
+
+            const c = try cursor.next() orelse break :tail;
+            if (needScroll) {
+                grid.scrollUp();
+                needScroll = false;
             }
-            if (buff[i] == '\n') {
-                skipX = true;
-                grid.putCell(x, y, .{
-                    .mode = .glyph,
-                    .data = .{ .glyph = @bitCast(@as(u124, @intCast(' '))) },
-                });
-                i += 1;
-                continue;
+
+            if (c == '\n') {
+                grid.splatRow(x, y, .glyph, ' ');
+                break;
             }
-            // TODO: utf8
-            grid.putCell(x, y, .{
-                .mode = .glyph,
-                .data = .{ .glyph = @bitCast(@as(u124, @intCast(buff[i]))) },
-            });
-            i += 1;
+
+            grid.put(x, y, .glyph, c);
         }
-        r.toss(i);
         try grid.flush(ctx, term);
     }
+    try grid.flush(ctx, term);
 }

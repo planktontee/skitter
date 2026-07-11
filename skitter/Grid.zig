@@ -100,15 +100,48 @@ pub fn deinit(self: *@This(), ctx: *Ctx) void {
     }
 }
 
-pub fn putCell(self: *@This(), x: usize, y: usize, cell: lcell.Cell) void {
+pub fn scrollUp(self: *@This()) void {
+    const fields = comptime simdFields();
+    comptime var i: usize = 0;
+    const targetSize = self.size.cols * self.size.rows - self.size.cols;
+    inline while (i < fields.len) : (i += 2) {
+        @memmove(
+            @field(self, fields[i])[0..targetSize],
+            @field(self, fields[i])[self.size.cols..],
+        );
+    }
+}
+
+pub fn splatRow(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cell: tag.concreteType()) void {
+    std.debug.assert(x < self.size.cols);
+    self.put(x, y, tag, cell);
+
+    if (x + 1 == self.size.cols) return;
+
+    const idx = y * self.size.cols + x;
+    const start = idx + 1;
+    const end = (y + 1) * self.size.cols;
+    const fields = comptime simdFields();
+    comptime var i: usize = 0;
+    inline while (i < fields.len) : (i += 2) {
+        @memset(
+            @field(self, fields[i])[start..end],
+            @field(self, fields[i])[idx],
+        );
+    }
+}
+
+// NOTE: putCell may be necessary in the future in case I want to support tags that are runtime
+// computed
+pub fn put(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cell: tag.concreteType()) void {
     if (y >= self.size.rows or x >= self.size.cols) return;
     const idx = y * self.size.cols + x;
 
     // Every mode uses the character slot (except skip/imageRoot padding)
     // We extract it dynamically or fall back to 0
-    switch (cell.mode) {
+    switch (tag) {
         .glyph => {
-            self.bChar[idx] = cell.data.glyph.char;
+            self.bChar[idx] = @as(u21, cell);
             self.bStyle[idx] = @bitCast(@as(u8, 0));
             self.bFgAnsi[idx] = @bitCast(@as(u9, 0));
             self.bBgAnsi[idx] = @bitCast(@as(u9, 0));
@@ -118,7 +151,7 @@ pub fn putCell(self: *@This(), x: usize, y: usize, cell: lcell.Cell) void {
             self.bUdDeco[idx] = .none;
         },
         .ansi => {
-            const ansi = cell.data.ansi;
+            const ansi = @as(lcell.AnsiCell, cell);
             self.bChar[idx] = ansi.char;
             self.bStyle[idx] = ansi.style;
 
@@ -131,7 +164,7 @@ pub fn putCell(self: *@This(), x: usize, y: usize, cell: lcell.Cell) void {
             self.bUdDeco[idx] = .none;
         },
         .trueColor => {
-            const tc = cell.data.trueColor;
+            const tc = @as(lcell.TrueColorCell, cell);
             self.bChar[idx] = tc.char;
             self.bStyle[idx] = tc.style;
 
@@ -155,6 +188,7 @@ pub fn putCell(self: *@This(), x: usize, y: usize, cell: lcell.Cell) void {
         },
     }
 }
+
 pub const FlushError = error{
     TBA,
 } || std.Io.Writer.Error || anyerror;
