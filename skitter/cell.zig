@@ -363,6 +363,8 @@ pub const Cell = packed struct(u128) {
     data: CellData,
 };
 
+// TODO: suport graphme cluster
+
 const testing = std.testing;
 test "Cell layout size" {
     try testing.expectEqual(16, @sizeOf(Cell));

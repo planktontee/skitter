@@ -66,7 +66,7 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, framesBySecond: usize, fps: 
                 const gWave = std.math.sin(@as(f32, @floatFromInt(x)) * 0.05 + @as(f32, @floatFromInt(frame)) * 0.03) * 127.0 + 128.0;
                 const bWave = std.math.cos(@as(f32, @floatFromInt(y + x)) * 0.1 + @as(f32, @floatFromInt(frame)) * 0.04) * 127.0 + 128.0;
 
-                grid.put(x, y, .trueColor, .{
+                _ = try grid.put(x, y, .trueColor, .{
                     .char = c,
                     .fg = .{
                         .r = @intFromFloat(rWave),

@@ -112,11 +112,24 @@ pub fn scrollUp(self: *@This()) void {
     }
 }
 
-pub fn splatRow(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cell: tag.concreteType()) void {
-    std.debug.assert(x < self.size.cols);
-    self.put(x, y, tag, cell);
+pub fn putAndSplatInRow(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cell: tag.concreteType()) PutResult {
+    const r = self.put(x, y, tag, cell);
+    switch (r) {
+        .skipped => return .skipped,
+        .putOne => {},
+        .putMany => return r,
+        .putToEndOfLine => return r,
+    }
 
-    if (x + 1 == self.size.cols) return;
+    if (self.splatCellInRow(x, y)) |pos|
+        return .{ .putToEndOfLine = pos }
+    else
+        return .putOne;
+}
+
+pub fn splatCellInRow(self: *@This(), x: usize, y: usize) ?PutResult.Position {
+    std.debug.assert(y < self.size.rows);
+    if (x + 1 == self.size.cols) return null;
 
     const idx = y * self.size.cols + x;
     const start = idx + 1;
@@ -129,19 +142,112 @@ pub fn splatRow(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode
             @field(self, fields[i])[idx],
         );
     }
+
+    return .{ .x = self.size.cols - 1, .y = y };
 }
 
-// NOTE: putCell may be necessary in the future in case I want to support tags that are runtime
-// computed
-pub fn put(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cell: tag.concreteType()) void {
-    if (y >= self.size.rows or x >= self.size.cols) return;
+fn splatStyleTo(self: *@This(), idx: usize, end: usize) void {
+    std.debug.assert(end <= self.bChar.len);
+
+    const start = idx + 1;
+    const fields = comptime simdFields()[2..];
+    comptime var i: usize = 0;
+    inline while (i < fields.len) : (i += 2) {
+        @memset(
+            @field(self, fields[i])[start..end],
+            @field(self, fields[i])[idx],
+        );
+    }
+}
+
+const CharToPrint = union(enum) {
+    c: u21,
+    seq: []const u21,
+    breakline,
+    // TODO: those should be enabled by a mode
+    backspace,
+    del,
+    // TODO: calculated relative tab spaces?
+    tab,
+
+    pub inline fn from(comptime tag: lcell.CellMode, cell: tag.concreteType()) @This() {
+        const c: u21 = switch (tag) {
+            .glyph => cell,
+            .ansi, .trueColor => cell.char,
+            .skip, .imgRoot => 0,
+        };
+
+        return switch (c) {
+            0x08 => .backspace,
+            '\t' => .tab,
+            '\n' => .breakline,
+            0x7F => .del,
+            inline 0x00...0x07 => |x| .{
+                .seq = &.{
+                    '^',
+                    @as(u8, @intCast(x)) + 0x40,
+                },
+            },
+            inline 0x0B...0x1F => |x| .{
+                .seq = &.{
+                    '^',
+                    @as(u8, @intCast(x)) + 0x40,
+                },
+            },
+            else => .{ .c = c },
+        };
+    }
+
+    pub fn char(self: @This()) u21 {
+        return switch (self) {
+            .c => self.c,
+            .breakline => ' ',
+            .seq => @intCast(self.seq[0]),
+            // TODO: fix this, it's not a sane default for the ctrl chars
+            else => ' ',
+        };
+    }
+};
+
+const PutResult = union(enum) {
+    skipped,
+    putOne,
+    putMany: Position,
+    putToEndOfLine: Position,
+
+    pub const Position = struct {
+        x: usize,
+        y: usize,
+    };
+};
+
+pub const PutError = error{
+    OutOfBoundsInsertion,
+};
+
+pub fn putBlank(self: *@This(), x: usize, y: usize) PutError!PutResult {
+    return self.put(x, y, .glyph, ' ');
+}
+
+pub fn putBreakLine(self: *@This(), x: usize, y: usize) PutError!PutResult {
+    return self.put(x, y, .glyph, '\n');
+}
+
+pub fn put(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cell: tag.concreteType()) PutError!PutResult {
+    std.debug.assert(x < self.size.cols);
+    std.debug.assert(y < self.size.rows);
+
+    if (y >= self.size.rows or x >= self.size.cols) return .skipped;
     const idx = y * self.size.cols + x;
 
-    // Every mode uses the character slot (except skip/imageRoot padding)
-    // We extract it dynamically or fall back to 0
+    std.debug.assert(idx < self.bChar.len);
+
+    const cToP = CharToPrint.from(tag, cell);
+    if (cToP == .seq and cToP.seq.len + idx >= self.bChar.len) return error.OutOfBoundsInsertion;
+
     switch (tag) {
         .glyph => {
-            self.bChar[idx] = @as(u21, cell);
+            self.bChar[idx] = cToP.char();
             self.bStyle[idx] = @bitCast(@as(u8, 0));
             self.bFgAnsi[idx] = @bitCast(@as(u9, 0));
             self.bBgAnsi[idx] = @bitCast(@as(u9, 0));
@@ -152,7 +258,7 @@ pub fn put(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cel
         },
         .ansi => {
             const ansi = @as(lcell.AnsiCell, cell);
-            self.bChar[idx] = ansi.char;
+            self.bChar[idx] = cToP.char();
             self.bStyle[idx] = ansi.style;
 
             self.bFgAnsi[idx] = .{ .color = ansi.fg, .toggled = !ansi.fgDefault };
@@ -165,7 +271,7 @@ pub fn put(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cel
         },
         .trueColor => {
             const tc = @as(lcell.TrueColorCell, cell);
-            self.bChar[idx] = tc.char;
+            self.bChar[idx] = cToP.char();
             self.bStyle[idx] = tc.style;
 
             self.bFgAnsi[idx] = @bitCast(@as(u9, 0));
@@ -177,7 +283,7 @@ pub fn put(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cel
             self.bUdDeco[idx] = tc.underlineStyle;
         },
         .skip, .imgRoot => {
-            self.bChar[idx] = 0;
+            self.bChar[idx] = cToP.char();
             self.bStyle[idx] = @bitCast(@as(u8, 0));
             self.bFgAnsi[idx] = @bitCast(@as(u9, 0));
             self.bBgAnsi[idx] = @bitCast(@as(u9, 0));
@@ -187,6 +293,28 @@ pub fn put(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cel
             self.bUdDeco[idx] = .none;
         },
     }
+
+    return switch (cToP) {
+        .c => .putOne,
+        .breakline => r: {
+            break :r if (self.splatCellInRow(x, y)) |pos|
+                .{ .putToEndOfLine = pos }
+            else
+                .putOne;
+        },
+        .seq => |s| r: {
+            const end = s.len + idx;
+            self.splatStyleTo(idx, end);
+            @memcpy(self.bChar[idx + 1 .. end], s[1 .. end - idx]);
+            break :r .{ .putMany = self.idxToPos(end - 1) };
+        },
+        // TODO: fix this, it's not a sane default
+        else => .putOne,
+    };
+}
+
+fn idxToPos(self: *const @This(), i: usize) PutResult.Position {
+    return .{ .x = i % self.size.cols, .y = i / self.size.cols };
 }
 
 pub const FlushError = error{

@@ -24,46 +24,79 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, fPath: ?[]const []const u8) 
     }
     const r = &fs.stream.interface;
 
-    var linesFilled: usize = 0;
     var cursor: regent.fs.Utf8Cursor = .{ .reader = r };
 
     // first pass fils the grid
-    while (Terminal.isRunning()) {
-        for (linesFilled..term.size.rows) |y| {
-            for (0..term.size.cols) |x| {
-                const optC = try cursor.next();
+    var y: usize = 0;
+    var cacheC: ?u21 = null;
+    while (y < term.size.rows) : (y += 1) {
+        var x: usize = 0;
+        while (x < term.size.cols) : (x += 1) {
+            const putR =
+                if (cacheC) |c| r: {
+                    cacheC = null;
+                    break :r try grid.put(x, y, .glyph, c);
+                } else if (v: {
+                    while (true) break :v cursor.next() catch continue;
+                }) |c|
+                    grid.put(x, y, .glyph, c) catch |e| switch (e) {
+                        error.OutOfBoundsInsertion => {
+                            _ = grid.putBlank(x, y) catch {};
+                            cacheC = c;
+                            break;
+                        },
+                    }
+                else
+                    try grid.putBreakLine(x, y);
 
-                if (optC == null or optC.? == '\n') {
-                    grid.splatRow(x, y, .glyph, ' ');
-                    break;
-                }
-
-                grid.put(x, y, .glyph, optC.?);
+            switch (putR) {
+                .putOne, .skipped => {},
+                .putMany => |pos| {
+                    x = pos.x;
+                    defer y = pos.y;
+                    if (y != pos.y) break;
+                },
+                .putToEndOfLine => break,
             }
-            linesFilled += 1;
         }
         try grid.flush(ctx, term);
-        if (linesFilled == term.size.rows) break;
     }
 
     // further passes shift
     tail: while (Terminal.isRunning()) {
         var needScroll: bool = true;
-        for (0..term.size.cols) |x| {
-            const y = term.size.rows - 1;
+        var x: usize = 0;
+        while (x < term.size.cols) : (x += 1) {
+            y = term.size.rows - 1;
 
-            const c = try cursor.next() orelse break :tail;
+            const c = if (cacheC) |c| r: {
+                cacheC = null;
+                break :r c;
+            } else v: {
+                while (true) break :v cursor.next() catch continue orelse break :tail;
+            };
             if (needScroll) {
-                grid.scrollUp();
                 needScroll = false;
+                grid.scrollUp();
             }
 
-            if (c == '\n') {
-                grid.splatRow(x, y, .glyph, ' ');
-                break;
-            }
+            const putR = grid.put(x, y, .glyph, c) catch |e| switch (e) {
+                error.OutOfBoundsInsertion => {
+                    _ = grid.putBlank(x, y) catch {};
+                    cacheC = c;
+                    break;
+                },
+            };
 
-            grid.put(x, y, .glyph, c);
+            switch (putR) {
+                .putOne, .skipped => {},
+                .putMany => |pos| {
+                    x = pos.x;
+                    defer y = pos.y;
+                    if (y != pos.y) break;
+                },
+                .putToEndOfLine => break,
+            }
         }
         try grid.flush(ctx, term);
     }
