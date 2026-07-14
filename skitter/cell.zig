@@ -223,7 +223,7 @@ pub const RGB = packed struct(u24) {
 };
 
 pub const UnderlineDecoration = enum(u3) {
-    none,
+    none = 0,
     line,
     double,
     wavy,
@@ -288,7 +288,7 @@ pub fn FmtColor(isBg: bool) type {
         ) !void {
             if (!to.eql(from)) {
                 switch (to) {
-                    .default => try seq.write(w, "39"),
+                    .default => try seq.write(w, if (isBg) "49" else "39"),
                     .ansi => |color| {
                         try seq.nextToken(w);
                         try color.write(isBg, w);

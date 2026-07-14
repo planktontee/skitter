@@ -80,6 +80,7 @@ pub fn trampMain(args: struct { ?Allocator, *Ctx, std.process.Init.Minimal }) !v
 
     var trace = try Trace.init(rctx);
     defer trace.deinit(rctx);
+    defer trace.dump() catch {};
 
     var term: terminal.Terminal = try .init(
         rctx,

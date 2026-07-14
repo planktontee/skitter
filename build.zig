@@ -39,6 +39,9 @@ pub fn build(b: *std.Build) void {
         .root_module = module,
         .use_llvm = true,
     });
+    exe.lto = if (optimize == .Debug) .none else .full;
+    exe.step.dependOn(&run_unit_tests.step);
+
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

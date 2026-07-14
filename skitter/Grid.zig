@@ -84,7 +84,7 @@ pub fn init(self: *@This(), pos: terminal.Pos, size: TermSize, ctx: *Ctx) std.me
         const PtrTypeInfo = @typeInfo(PtrType);
         @field(self, fieldName) = try ctx.heapAlloc.alignedAlloc(PtrType, alignment, targetSize);
         @memset(@field(self, fieldName), switch (PtrTypeInfo) {
-            .int => 0,
+            .int => ' ',
             .@"enum" => @enumFromInt(0),
             .@"struct" => @bitCast(@as(PtrTypeInfo.@"struct".backing_integer.?, 0)),
             else => unreachable,
@@ -115,7 +115,6 @@ pub fn scrollUp(self: *@This()) void {
 pub fn putAndSplatInRow(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cell: tag.concreteType()) PutResult {
     const r = self.put(x, y, tag, cell);
     switch (r) {
-        .skipped => return .skipped,
         .putOne => {},
         .putMany => return r,
         .putToEndOfLine => return r,
@@ -210,7 +209,6 @@ const CharToPrint = union(enum) {
 };
 
 const PutResult = union(enum) {
-    skipped,
     putOne,
     putMany: Position,
     putToEndOfLine: Position,
@@ -237,13 +235,13 @@ pub fn put(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cel
     std.debug.assert(x < self.size.cols);
     std.debug.assert(y < self.size.rows);
 
-    if (y >= self.size.rows or x >= self.size.cols) return .skipped;
     const idx = y * self.size.cols + x;
 
     std.debug.assert(idx < self.bChar.len);
 
     const cToP = CharToPrint.from(tag, cell);
-    if (cToP == .seq and cToP.seq.len + idx >= self.bChar.len) return error.OutOfBoundsInsertion;
+    // NOTE: idx is already at seq[0], so len is -1
+    if (cToP == .seq and cToP.seq.len + idx > self.bChar.len) return error.OutOfBoundsInsertion;
 
     switch (tag) {
         .glyph => {
@@ -359,26 +357,31 @@ pub fn fullFlush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {
 }
 
 const FlushState = struct {
-    line: usize = 0,
-    jumpCursor: bool = true,
+    known: bool = false,
+    x: usize = 0,
+    y: usize = 0,
+
+    pub fn save(self: *@This(), pos: PutResult.Position) void {
+        self.known = true;
+        self.x = pos.x;
+        self.y = pos.y;
+    }
 };
 
 fn resolveCellDiff(self: *@This(), fState: *FlushState, w: *std.Io.Writer, i: usize, hasDiff: bool) !void {
-    if (fState.line != i / self.size.cols) fState.jumpCursor = true;
-    if (hasDiff) {
-        if (fState.jumpCursor) {
-            try control.moveCursor(
-                w,
-                self.pos.x + (i % self.size.cols),
-                self.pos.y + (i / self.size.cols),
-            );
-            fState.jumpCursor = false;
-            fState.line = i / self.size.cols;
-        }
-        if (!try self.writeCellAt(w, i)) fState.jumpCursor = true;
-    } else if (!fState.jumpCursor) {
-        fState.jumpCursor = true;
+    if (!hasDiff) return;
+
+    const tPos = self.idxToPos(i);
+
+    if (fState.known and tPos.y == fState.y and tPos.x >= fState.x) {
+        if (tPos.x > fState.x + 1)
+            try control.forwardCursor(w, tPos.x - fState.x - 1);
+    } else {
+        try control.moveCursor(w, self.pos.x + tPos.x, self.pos.y + tPos.y);
     }
+    fState.save(tPos);
+
+    _ = try self.writeCellAt(w, i);
 }
 
 pub fn flush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {

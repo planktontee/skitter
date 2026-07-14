@@ -6,6 +6,65 @@ const Ctx = @import("../skitter.zig").Ctx;
 const Trace = @import("../skitter/Trace.zig");
 const regent = @import("regent");
 
+pub const PutResult = enum {
+    forwarded,
+    nextLine,
+    overflow,
+};
+
+pub const GridCursor = struct {
+    grid: *Grid,
+    x: usize = 0,
+    y: usize = 0,
+
+    pub fn toLastRow(self: *@This()) void {
+        self.y = self.grid.size.rows - 1;
+        self.x = 0;
+    }
+
+    fn wrap(self: *@This()) bool {
+        if (self.x == self.grid.size.cols) {
+            self.x = 0;
+            self.y += 1;
+            return true;
+        }
+        return false;
+    }
+
+    pub fn putChar(self: *@This(), c: u21) PutResult {
+        // TODO: there's a bug here in case the cols are too small and cant fit a sequence translation
+        // and we end up going into overflow loop if c is not dropped at the caller level
+        if (self.y >= self.grid.size.rows) return .overflow;
+
+        const putR = self.grid.put(self.x, self.y, .glyph, c) catch |e| switch (e) {
+            error.OutOfBoundsInsertion => {
+                _ = self.grid.putBlank(self.x, self.y) catch {};
+                self.y += 1;
+                self.x = 0;
+                return .overflow;
+            },
+        };
+
+        return switch (putR) {
+            .putOne => r: {
+                self.x += 1;
+                break :r if (self.wrap()) .nextLine else .forwarded;
+            },
+            .putMany => |pos| r: {
+                self.x = pos.x + 1;
+                self.y = pos.y;
+                break :r if (self.wrap()) .nextLine else .forwarded;
+            },
+            .putToEndOfLine => |pos| r: {
+                self.x = pos.x + 1;
+                const wrapped = self.wrap();
+                std.debug.assert(wrapped);
+                break :r .nextLine;
+            },
+        };
+    }
+};
+
 pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, fPath: ?[]const []const u8) !void {
     const path = if (fPath) |p|
         p[0]
@@ -24,81 +83,27 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, fPath: ?[]const []const u8) 
     }
     const r = &fs.stream.interface;
 
-    var cursor: regent.fs.Utf8Cursor = .{ .reader = r };
+    var charCursor: regent.fs.Utf8Cursor = .{ .reader = r };
+    var gridCursor: GridCursor = .{ .grid = grid };
 
-    // first pass fils the grid
-    var y: usize = 0;
-    var cacheC: ?u21 = null;
-    while (y < term.size.rows) : (y += 1) {
-        var x: usize = 0;
-        while (x < term.size.cols) : (x += 1) {
-            const putR =
-                if (cacheC) |c| r: {
-                    cacheC = null;
-                    break :r try grid.put(x, y, .glyph, c);
-                } else if (v: {
-                    while (true) break :v cursor.next() catch continue;
-                }) |c|
-                    grid.put(x, y, .glyph, c) catch |e| switch (e) {
-                        error.OutOfBoundsInsertion => {
-                            _ = grid.putBlank(x, y) catch {};
-                            cacheC = c;
-                            break;
-                        },
-                    }
-                else
-                    try grid.putBreakLine(x, y);
-
-            switch (putR) {
-                .putOne, .skipped => {},
-                .putMany => |pos| {
-                    x = pos.x;
-                    defer y = pos.y;
-                    if (y != pos.y) break;
-                },
-                .putToEndOfLine => break,
-            }
-        }
-        try grid.flush(ctx, term);
-    }
-
-    // further passes shift
-    tail: while (Terminal.isRunning()) {
-        var needScroll: bool = true;
-        var x: usize = 0;
-        while (x < term.size.cols) : (x += 1) {
-            y = term.size.rows - 1;
-
-            const c = if (cacheC) |c| r: {
-                cacheC = null;
-                break :r c;
-            } else v: {
-                while (true) break :v cursor.next() catch continue orelse break :tail;
+    var char: ?u21 = null;
+    loop: while (Terminal.isRunning()) {
+        if (char == null) {
+            char = r: {
+                while (true) break :r charCursor.next() catch continue orelse break :loop;
             };
-            if (needScroll) {
-                needScroll = false;
+        }
+
+        switch (gridCursor.putChar(char.?)) {
+            .forwarded => char = null,
+            .nextLine => {
+                try grid.flush(ctx, term);
+                char = null;
+            },
+            .overflow => {
                 grid.scrollUp();
-            }
-
-            const putR = grid.put(x, y, .glyph, c) catch |e| switch (e) {
-                error.OutOfBoundsInsertion => {
-                    _ = grid.putBlank(x, y) catch {};
-                    cacheC = c;
-                    break;
-                },
-            };
-
-            switch (putR) {
-                .putOne, .skipped => {},
-                .putMany => |pos| {
-                    x = pos.x;
-                    defer y = pos.y;
-                    if (y != pos.y) break;
-                },
-                .putToEndOfLine => break,
-            }
+                gridCursor.toLastRow();
+            },
         }
-        try grid.flush(ctx, term);
     }
-    try grid.flush(ctx, term);
 }

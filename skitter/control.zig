@@ -5,6 +5,10 @@ pub fn moveCursor(w: *Writer, x: usize, y: usize) Writer.Error!void {
     try w.print("\x1b[{d};{d}H", .{ y + 1, x + 1 });
 }
 
+pub fn forwardCursor(w: *Writer, n: usize) Writer.Error!void {
+    try w.print("\x1b[{d}C", .{n});
+}
+
 pub fn hideCursor() []const u8 {
     return "\x1b[?25l";
 }
