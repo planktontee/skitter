@@ -187,10 +187,10 @@ pub const AnsiColor = packed union {
                 try w.print("{d}", .{code});
             },
             inline else => {
-                try w.print(if (isBg)
-                    "48;5;{d}"
-                else
-                    "38;5;{d}", .{@as(u8, @bitCast(self))});
+                try w.print(
+                    (if (isBg) "48" else "38") ++ ";5;{d}",
+                    .{@as(u8, @bitCast(self))},
+                );
             },
         }
     }
@@ -203,11 +203,11 @@ pub const FlaggedAnsiColor = packed struct(u9) {
 
 pub const AnsiCell = packed struct(u124) {
     char: u21,
-    style: Style,
-    fg: AnsiColor,
-    fgDefault: bool,
-    bg: AnsiColor,
-    bgDefault: bool,
+    style: Style = .{},
+    fg: AnsiColor = .init(0),
+    fgDefault: bool = true,
+    bg: AnsiColor = .init(0),
+    bgDefault: bool = true,
     _: u77 = 0,
 };
 
@@ -232,6 +232,7 @@ pub const UnderlineDecoration = enum(u3) {
 
     pub fn writeDiff(to: @This(), w: *std.Io.Writer, seq: *TermStyleSeq, from: @This()) !void {
         if (to != from)
+            // 4: is for the extended protocol, the default protocol is just 4;
             if (to == .none)
                 try seq.write(w, "4:0")
             else
@@ -246,7 +247,7 @@ pub const FlaggedTrueColor = packed struct(u25) {
 
 pub const TrueColorCell = packed struct(u124) {
     char: u21,
-    style: Style = @bitCast(@as(u8, 0)),
+    style: Style = .{},
     fg: RGB = @bitCast(@as(u24, 0)),
     fgDefault: bool = true,
     bg: RGB = @bitCast(@as(u24, 0)),
@@ -294,7 +295,7 @@ pub fn FmtColor(isBg: bool) type {
                         try color.write(isBg, w);
                     },
                     .rgb => |rgb| {
-                        try seq.write(w, (if (isBg) "48" else "38" ++ ";2;"));
+                        try seq.write(w, (if (isBg) "48" else "38") ++ ";2;");
                         try rgb.write(w);
                     },
                 }
@@ -328,7 +329,7 @@ pub const UnderlineColorFmt = union(enum) {
 };
 
 pub const CellFmt = struct {
-    style: Style = @bitCast(@as(u8, 0)),
+    style: Style = .{},
     fg: FmtColor(false) = .default,
     bg: FmtColor(true) = .default,
     udDeco: UnderlineDecoration = .none,
@@ -419,7 +420,6 @@ test "TrueColorCell Full Integer Hex Blasting" {
         .data = .{
             .trueColor = .{
                 .char = '🔥',
-                .style = @bitCast(@as(u8, 0x00)),
                 .fg = @bitCast(@as(u24, 0xFF6400)),
                 .fgDefault = false,
                 .bg = @bitCast(@as(u24, 0x000000)),

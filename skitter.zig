@@ -117,5 +117,5 @@ pub fn trampMain(args: struct { ?Allocator, *Ctx, std.process.Init.Minimal }) !v
 }
 
 test {
-    _ = mArgs;
+    std.testing.refAllDecls(@This());
 }

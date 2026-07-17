@@ -37,9 +37,7 @@ sUdTrue: []align(alignmentBytes) lcell.FlaggedTrueColor,
 bUdDeco: []align(alignmentBytes) lcell.UnderlineDecoration,
 sUdDeco: []align(alignmentBytes) lcell.UnderlineDecoration,
 
-rng: std.Random.IoSource,
-
-state: lcell.CellFmt = .{},
+state: lcell.CellFmt,
 
 const alignmentBytes = if (std.simd.suggestVectorLength(u8)) |L| L else 8;
 const alignment: std.mem.Alignment = .fromByteUnits(alignmentBytes);
@@ -72,9 +70,10 @@ fn simdFields() []const []const u8 {
     };
 }
 
-pub fn init(self: *@This(), pos: terminal.Pos, size: TermSize, ctx: *Ctx) std.mem.Allocator.Error!void {
+pub fn init(self: *@This(), pos: terminal.Pos, size: TermSize, ctx: *const Ctx) std.mem.Allocator.Error!void {
     self.size = size;
     self.pos = pos;
+    self.state = .{};
 
     const targetSize: usize = size.rows * size.cols;
 
@@ -90,11 +89,9 @@ pub fn init(self: *@This(), pos: terminal.Pos, size: TermSize, ctx: *Ctx) std.me
             else => unreachable,
         });
     }
-
-    self.rng = std.Random.IoSource{ .io = ctx.io };
 }
 
-pub fn deinit(self: *@This(), ctx: *Ctx) void {
+pub fn deinit(self: *@This(), ctx: *const Ctx) void {
     inline for (comptime simdFields()) |fieldName| {
         ctx.heapAlloc.free(@field(self, fieldName));
     }
@@ -246,7 +243,7 @@ pub fn put(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cel
     switch (tag) {
         .glyph => {
             self.bChar[idx] = cToP.char();
-            self.bStyle[idx] = @bitCast(@as(u8, 0));
+            self.bStyle[idx] = .{};
             self.bFgAnsi[idx] = @bitCast(@as(u9, 0));
             self.bBgAnsi[idx] = @bitCast(@as(u9, 0));
             self.bFgTrue[idx] = @bitCast(@as(u25, 0));
@@ -282,7 +279,7 @@ pub fn put(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cel
         },
         .skip, .imgRoot => {
             self.bChar[idx] = cToP.char();
-            self.bStyle[idx] = @bitCast(@as(u8, 0));
+            self.bStyle[idx] = .{};
             self.bFgAnsi[idx] = @bitCast(@as(u9, 0));
             self.bBgAnsi[idx] = @bitCast(@as(u9, 0));
             self.bFgTrue[idx] = @bitCast(@as(u25, 0));
@@ -327,35 +324,6 @@ pub fn commit(self: *@This()) void {
     }
 }
 
-pub fn fullFlush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {
-    const w: *std.Io.Writer = &term.fsOut.stream.interface;
-
-    const rctx: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.heapAlloc };
-    if (term.trace) |t| try t.pushTimer(rctx);
-    try control.moveCursor(w, self.pos.x, self.pos.y);
-    var line: usize = 0;
-    for (0..self.size.rows * self.size.cols) |i| {
-        if (i / self.size.cols > line) {
-            try w.writeAll(control.moveToNextLine());
-            line += 1;
-        }
-        _ = try self.writeCellAt(w, i);
-    }
-    if (term.trace) |t| try t.popTimer(rctx, .@"grid.full.serialize");
-
-    const bufferedLen = w.buffered().len;
-
-    if (term.trace) |t| try t.metrics.append(ctx.heapAlloc, .{
-        .@"grid.full.size" = bufferedLen,
-    });
-
-    if (term.trace) |t| try t.pushTimer(rctx);
-    try w.flush();
-
-    if (bufferedLen > 0) self.commit();
-    if (term.trace) |t| try t.popTimer(rctx, .@"grid.full.flush");
-}
-
 const FlushState = struct {
     known: bool = false,
     x: usize = 0,
@@ -384,15 +352,10 @@ fn resolveCellDiff(self: *@This(), fState: *FlushState, w: *std.Io.Writer, i: us
     _ = try self.writeCellAt(w, i);
 }
 
-pub fn flush(self: *@This(), ctx: *Ctx, term: *Terminal) FlushError!void {
+pub fn flush(self: *@This(), ctx: *const Ctx, term: *Terminal) FlushError!void {
     if (term.trace) |t| try t.metrics.append(ctx.heapAlloc, .{
         .@"grid.buffer.size" = self.size.rows * self.size.rows,
     });
-
-    // This is here for comparison at the moment
-    if (self.rng.interface().float(f32) >= 0.5) {
-        return self.fullFlush(ctx, term);
-    }
 
     const rctx: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.heapAlloc };
     if (term.trace) |t| try t.pushTimer(rctx);
@@ -523,9 +486,8 @@ fn toCellFmt(self: *const @This(), target: *lcell.CellFmt, idx: usize) void {
     } else .none;
 }
 
-fn writeCellAt(self: *@This(), w: *std.Io.Writer, idx: usize) !bool {
+fn writeCellAt(self: *@This(), w: *std.Io.Writer, idx: usize) !void {
     const char = self.bChar[idx];
-    if (char == 0) return false;
 
     const from = self.state;
     var newFmt: lcell.CellFmt = undefined;
@@ -534,5 +496,151 @@ fn writeCellAt(self: *@This(), w: *std.Io.Writer, idx: usize) !bool {
 
     try to.writeCharWithDiff(w, &from, char);
     self.state = newFmt;
-    return true;
+}
+
+const Grid = @This();
+
+test "general grid diff checks" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var ctx: Ctx = .{
+        .debugAlloc = alloc,
+        .heapAlloc = alloc,
+        .stackAlloc = alloc,
+        .io = io,
+    };
+
+    const size: TermSize = .{ .rows = 40, .cols = 40 };
+    const pos: terminal.Pos = .{ .x = 0, .y = 0 };
+
+    var grid: Grid = undefined;
+    try grid.init(pos, size, &ctx);
+    defer grid.deinit(&ctx);
+
+    try testing.expectEqual(.putOne, try grid.put(20, 20, .trueColor, .{
+        .char = 'A',
+        .bg = .{ .r = 0x30, .g = 0x60, .b = 0x30 },
+        .bgDefault = false,
+        .fg = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
+        .fgDefault = false,
+        .style = .{ .bold = true },
+        .underlineStyle = .wavy,
+        .underline = .{ .r = 0x7F, .g = 0xFF, .b = 0xFF },
+        .underlineDefault = false,
+    }));
+
+    try testing.expectEqual(.putOne, try grid.put(35, 20, .trueColor, .{
+        .char = 'B',
+        .bgDefault = true,
+        .fg = .{ .r = 0xFF, .g = 0x7F, .b = 0x7F },
+        .fgDefault = false,
+        .style = .{},
+        .underlineStyle = .none,
+        .underlineDefault = true,
+    }));
+
+    try testing.expectEqual(.putOne, try grid.put(39, 20, .glyph, 'C'));
+    try testing.expectEqual(.putOne, try grid.put(0, 21, .glyph, 'D'));
+
+    try testing.expectEqual(.putOne, try grid.put(1, 21, .glyph, 'E'));
+    try testing.expectEqual(.putOne, try grid.put(2, 21, .ansi, .{
+        .char = 'F',
+        .style = .{ .italic = true },
+        .bg = .{ .system = .blue },
+        .bgDefault = false,
+        .fg = lcell.CubeColor.toAnsiColor(.{ .r = 3, .g = 4, .b = 1 }),
+        .fgDefault = false,
+    }));
+    try testing.expectEqual(.putOne, try grid.put(3, 21, .glyph, 'G'));
+    try testing.expectEqual(.putOne, try grid.put(4, 21, .glyph, 'H'));
+    // This will wipe the 2,21 cells style
+    grid.splatStyleTo(1 + 21 * grid.size.cols, 5 + 21 * grid.size.cols);
+
+    try testing.expectEqual(.putOne, try grid.put(6, 21, .glyph, 'X'));
+    // This will wipe X but doesnt actually write anything because base grid assumes wiped spaces
+    try testing.expectEqualDeep(
+        @as(PutResult, .{ .putToEndOfLine = .{ .x = 39, .y = 21 } }),
+        try grid.put(5, 21, .glyph, '\n'),
+    );
+
+    try testing.expectEqual(.putOne, try grid.put(0, 22, .ansi, .{
+        .char = 'i',
+        .style = .{ .italic = true },
+        .bg = .{ .system = .blue },
+        .bgDefault = false,
+        .fg = lcell.CubeColor.toAnsiColor(.{ .r = 3, .g = 4, .b = 1 }),
+        .fgDefault = false,
+    }));
+    try testing.expectEqual(.putOne, try grid.put(1, 22, .glyph, 'j'));
+    try testing.expectEqual(.putOne, try grid.put(2, 22, .glyph, 'k'));
+    // This will splash I's style to J and K
+    grid.splatStyleTo(22 * grid.size.cols, 3 + 22 * grid.size.cols);
+
+    try testing.expectEqual(.putOne, try grid.put(3, 22, .glyph, 'L'));
+
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.File.Writer = undefined;
+    w.interface = .fixed(&buf);
+
+    var term: Terminal = .{
+        .beforeTtyAttr = undefined,
+        .fsIn = undefined,
+        .fsOut = .{
+            .alignment = .@"1",
+            .bufferType = .byte,
+            .stat = undefined,
+            .stream = w,
+        },
+        .size = size,
+        .trueSize = size,
+        .mode = .{ .window = size },
+        .startPos = pos,
+    };
+    try grid.flush(&ctx, &term);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const arenaAlloc = arena.allocator();
+
+    const b = try testSeqFmt(arenaAlloc, term.fsOut.stream.interface.buffered());
+    testing.expectEqualStrings(
+        try testSeqFmt(arenaAlloc, "\x1b[21;21H" ++
+            "\x1b[1;38;2;255;255;255;48;2;48;96;48;4:3;58;2;127;255;255mA" ++
+            "\x1b[14C" ++
+            "\x1b[22;38;2;255;127;127;49;4:0;58mB" ++
+            "\x1b[3C" ++
+            "\x1b[39mC" ++
+            "\x1b[22;1HDEFGH" ++
+            "\x1b[23;1H" ++
+            "\x1b[3;38;5;149;44mijk" ++
+            "\x1b[23;39;49mL"),
+        try testSeqFmt(arenaAlloc, b),
+    ) catch |e| {
+        std.debug.print("{s}\n", .{b});
+        return e;
+    };
+}
+
+fn testSeqFmt(alloc: std.mem.Allocator, b: []const u8) ![]const u8 {
+    var arr: std.ArrayList(u8) = try .initCapacity(alloc, b.len);
+
+    var rem = b;
+    var first: bool = true;
+    while (rem.len > 0) : (rem = rem[1..]) {
+        switch (rem[0]) {
+            ' ' => try arr.print(alloc, "{u}", .{'⎵'}),
+            0x1b => {
+                if (!first) {
+                    try arr.append(alloc, '\n');
+                }
+                first = false;
+                try arr.print(alloc, "\\x1b", .{});
+            },
+            else => |c| try arr.append(alloc, c),
+        }
+    }
+
+    return arr.items;
 }
