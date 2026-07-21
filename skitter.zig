@@ -118,4 +118,5 @@ pub fn trampMain(args: struct { ?Allocator, *Ctx, std.process.Init.Minimal }) !v
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("ex/top/process.zig");
 }
