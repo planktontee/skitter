@@ -176,22 +176,20 @@ pub const AnsiColor = packed union {
         };
     }
 
-    pub fn write(self: @This(), comptime isBg: bool, w: *std.Io.Writer) !void {
+    pub fn write(self: @This(), w: *std.Io.Writer, comptime region: ColorRegion) !void {
         switch (self.tag()) {
             .system => {
                 const idx = @as(u8, @bitCast(self));
-                const code = if (idx < 8)
-                    (if (isBg) 40 else 30) + idx
-                else
-                    (if (isBg) 100 else 90) + (idx - 8);
-                try w.print("{d}", .{code});
+                // FG / BG uses legacy indexing, underscore just uses 58;5
+                switch (region) {
+                    .underline => try w.print(region.ansi() ++ "{d}", .{region.ansiColorIdx(idx)}),
+                    else => try w.print("{d}", .{region.ansiColorIdx(idx)}),
+                }
             },
-            inline else => {
-                try w.print(
-                    (if (isBg) "48" else "38") ++ ";5;{d}",
-                    .{@as(u8, @bitCast(self))},
-                );
-            },
+            inline else => try w.print(
+                region.ansi() ++ "{d}",
+                .{@as(u8, @bitCast(self))},
+            ),
         }
     }
 };
@@ -266,7 +264,51 @@ pub const SkipCell = packed struct(u124) {
     _: u124 = 0,
 };
 
-pub fn FmtColor(isBg: bool) type {
+pub const ColorRegion = enum {
+    bg,
+    fg,
+    underline,
+
+    pub fn default(comptime self: @This()) []const u8 {
+        return switch (self) {
+            .fg => comptime "39",
+            .bg => comptime "49",
+            .underline => comptime "59",
+        };
+    }
+
+    fn nonDefaultCode(comptime self: @This()) []const u8 {
+        return switch (self) {
+            .fg => comptime "38",
+            .bg => comptime "48",
+            .underline => comptime "58",
+        };
+    }
+
+    pub fn ansi(comptime self: @This()) []const u8 {
+        return comptime self.nonDefaultCode() ++ ";5;";
+    }
+
+    pub fn rgb(comptime self: @This()) []const u8 {
+        return comptime self.nonDefaultCode() ++ ";2;";
+    }
+
+    pub fn ansiColorIdx(comptime self: @This(), idx: u8) u8 {
+        return switch (self) {
+            .fg => if (idx < 8)
+                idx + 30
+            else
+                idx - 8 + 90,
+            .bg => if (idx < 8)
+                idx + 40
+            else
+                idx - 8 + 100,
+            .underline => idx,
+        };
+    }
+};
+
+pub fn FmtColor(comptime region: ColorRegion) type {
     return union(enum) {
         default,
         ansi: AnsiColor,
@@ -289,13 +331,13 @@ pub fn FmtColor(isBg: bool) type {
         ) !void {
             if (!to.eql(from)) {
                 switch (to) {
-                    .default => try seq.write(w, if (isBg) "49" else "39"),
+                    .default => try seq.write(w, region.default()),
                     .ansi => |color| {
                         try seq.nextToken(w);
-                        try color.write(isBg, w);
+                        try color.write(w, region);
                     },
                     .rgb => |rgb| {
-                        try seq.write(w, (if (isBg) "48" else "38") ++ ";2;");
+                        try seq.write(w, region.rgb());
                         try rgb.write(w);
                     },
                 }
@@ -304,36 +346,12 @@ pub fn FmtColor(isBg: bool) type {
     };
 }
 
-pub const UnderlineColorFmt = union(enum) {
-    none,
-    rgb: RGB,
-
-    pub fn eql(self: @This(), other: @This()) bool {
-        if (std.meta.activeTag(self) != std.meta.activeTag(other)) return false;
-        return switch (self) {
-            .none => true,
-            .rgb => |color| color == other.rgb,
-        };
-    }
-
-    pub fn writeDiff(to: @This(), w: *std.Io.Writer, seq: *TermStyleSeq, from: @This()) !void {
-        if (!to.eql(from))
-            switch (to) {
-                .none => try seq.write(w, "58"),
-                .rgb => |rgb| {
-                    try seq.write(w, "58;2;");
-                    try rgb.write(w);
-                },
-            };
-    }
-};
-
 pub const CellFmt = struct {
     style: Style = .{},
-    fg: FmtColor(false) = .default,
-    bg: FmtColor(true) = .default,
+    fg: FmtColor(.fg) = .default,
+    bg: FmtColor(.bg) = .default,
     udDeco: UnderlineDecoration = .none,
-    udColor: UnderlineColorFmt = .none,
+    udColor: FmtColor(.underline) = .default,
 
     pub fn writeCharWithDiff(to: *const @This(), w: *std.Io.Writer, from: *const @This(), char: u21) !void {
         var seq: control.TermStyleSeq = .{};
@@ -438,4 +456,75 @@ test "TrueColorCell Full Integer Hex Blasting" {
     try testing.expectEqual(@as(u24, 0xFF6400), @as(u24, @bitCast(cell.data.trueColor.fg)));
     try testing.expectEqual(@as(u24, 0xFFFFFF), @as(u24, @bitCast(cell.data.trueColor.underline)));
     try testing.expectEqual(.wavy, cell.data.trueColor.underlineStyle);
+}
+
+test "diff cell format" {
+    const testSeqFmt = control.testSeqFmt;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const arenaAlloc = arena.allocator();
+
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+
+    try @as(CellFmt, .{
+        .style = .{ .blink = true, .bold = true },
+        .bg = .{ .ansi = .init(4) },
+        .fg = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } },
+        .udDeco = .dashed,
+    }).writeCharWithDiff(&w, &@as(CellFmt, .{}), 'A');
+
+    const r1 = try testSeqFmt(arenaAlloc, w.buffered());
+    testing.expectEqualStrings(try testSeqFmt(
+        arenaAlloc,
+        "\x1b[1;5;38;2;255;255;255;44;4:5mA",
+    ), r1) catch |e| {
+        std.debug.print("{s}\n", .{r1});
+        return e;
+    };
+    _ = w.consumeAll();
+
+    try @as(CellFmt, .{
+        .bg = .{ .ansi = .init(4) },
+        .fg = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } },
+        .udColor = .{ .ansi = .{ .system = AnsiSystemColor.blue } },
+        .udDeco = .wavy,
+    }).writeCharWithDiff(&w, &@as(CellFmt, .{
+        .style = .{ .bold = true },
+        .bg = .{ .ansi = .init(4) },
+        .fg = .{ .ansi = .{ .system = AnsiSystemColor.blue } },
+    }), 'A');
+
+    const r2 = try testSeqFmt(arenaAlloc, w.buffered());
+    testing.expectEqualStrings(try testSeqFmt(
+        arenaAlloc,
+        "\x1b[22;38;2;255;255;255;4:3;58;5;4mA",
+    ), r2) catch |e| {
+        std.debug.print("{s}\n", .{r2});
+        return e;
+    };
+    _ = w.consumeAll();
+
+    try @as(CellFmt, .{}).writeCharWithDiff(&w, &@as(CellFmt, .{
+        .style = .{
+            .bold = true,
+            .italic = true,
+            .blink = true,
+            .strike = true,
+        },
+        .bg = .{ .rgb = .{ .r = 0xFF, .g = 0x00, .b = 0x00 } },
+        .fg = .{ .rgb = .{ .r = 0x00, .g = 0xFF, .b = 0x00 } },
+        .udDeco = .wavy,
+        .udColor = .{ .rgb = .{ .r = 0x00, .g = 0x00, .b = 0xFF } },
+    }), 'A');
+
+    const r3 = try testSeqFmt(arenaAlloc, w.buffered());
+    testing.expectEqualStrings(try testSeqFmt(
+        arenaAlloc,
+        "\x1b[22;23;25;29;39;49;4:0;59mA",
+    ), r3) catch |e| {
+        std.debug.print("{s}\n", .{r3});
+        return e;
+    };
+    _ = w.consumeAll();
 }

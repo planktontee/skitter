@@ -78,3 +78,25 @@ pub const TermStyleSeq = struct {
         if (self.started) try w.writeByte('m');
     }
 };
+
+pub fn testSeqFmt(alloc: std.mem.Allocator, b: []const u8) ![]const u8 {
+    var arr: std.ArrayList(u8) = try .initCapacity(alloc, b.len);
+
+    var rem = b;
+    var first: bool = true;
+    while (rem.len > 0) : (rem = rem[1..]) {
+        switch (rem[0]) {
+            ' ' => try arr.print(alloc, "{u}", .{'⎵'}),
+            0x1b => {
+                if (!first) {
+                    try arr.append(alloc, '\n');
+                }
+                first = false;
+                try arr.print(alloc, "\\x1b", .{});
+            },
+            else => |c| try arr.append(alloc, c),
+        }
+    }
+
+    return arr.items;
+}

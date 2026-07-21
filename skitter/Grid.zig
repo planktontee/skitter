@@ -483,7 +483,7 @@ fn toCellFmt(self: *const @This(), target: *lcell.CellFmt, idx: usize) void {
     target.udDeco = self.bUdDeco[idx];
     target.udColor = if (self.bUdTrue[idx].toggled) .{
         .rgb = self.bUdTrue[idx].color,
-    } else .none;
+    } else .default;
 }
 
 fn writeCellAt(self: *@This(), w: *std.Io.Writer, idx: usize) !void {
@@ -504,6 +504,7 @@ test "general grid diff checks" {
     const testing = std.testing;
     const alloc = testing.allocator;
     const io = testing.io;
+    const testSeqFmt = control.testSeqFmt;
 
     var ctx: Ctx = .{
         .debugAlloc = alloc,
@@ -609,7 +610,7 @@ test "general grid diff checks" {
         try testSeqFmt(arenaAlloc, "\x1b[21;21H" ++
             "\x1b[1;38;2;255;255;255;48;2;48;96;48;4:3;58;2;127;255;255mA" ++
             "\x1b[14C" ++
-            "\x1b[22;38;2;255;127;127;49;4:0;58mB" ++
+            "\x1b[22;38;2;255;127;127;49;4:0;59mB" ++
             "\x1b[3C" ++
             "\x1b[39mC" ++
             "\x1b[22;1HDEFGH" ++
@@ -621,26 +622,4 @@ test "general grid diff checks" {
         std.debug.print("{s}\n", .{b});
         return e;
     };
-}
-
-fn testSeqFmt(alloc: std.mem.Allocator, b: []const u8) ![]const u8 {
-    var arr: std.ArrayList(u8) = try .initCapacity(alloc, b.len);
-
-    var rem = b;
-    var first: bool = true;
-    while (rem.len > 0) : (rem = rem[1..]) {
-        switch (rem[0]) {
-            ' ' => try arr.print(alloc, "{u}", .{'⎵'}),
-            0x1b => {
-                if (!first) {
-                    try arr.append(alloc, '\n');
-                }
-                first = false;
-                try arr.print(alloc, "\\x1b", .{});
-            },
-            else => |c| try arr.append(alloc, c),
-        }
-    }
-
-    return arr.items;
 }
