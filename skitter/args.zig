@@ -249,10 +249,44 @@ pub const TailArgs = struct {
     };
 };
 
+pub const TopArgs = struct {
+    fullscreen: ?bool = null,
+    window: ?TermSize = null,
+
+    pub const Short = .{
+        .w = .window,
+        .f = .fullscreen,
+    };
+
+    pub const Codec = TermSizeCodec(@This());
+
+    pub const Help: help.HelpData(@This()) = .{
+        .usage = &.{"skitter top <options>"},
+        .description = "Top program to watch resources and process",
+        .examples = &.{
+            "skitter top -w 40x80",
+        },
+        .optionsDescription = &.{
+            .{ .field = .fullscreen, .description = "Claims entire tty screen. Either this or --window is required." },
+            .{ .field = .window, .description = "Gives a window (WxH) size to poll file/stdin. Either this or --fullscreen is required." },
+        },
+    };
+
+    fn validateArgs(fbset: zcasp.validate.FieldBitSet(@This())) zcasp.validate.Error!void {
+        if (fbset.allOf(.{ .fullscreen, .window })) return error.MutuallyExclusiveArgsPresent;
+        if (!fbset.oneOf(.{ .fullscreen, .window })) return error.RequiredArgsMissing;
+    }
+
+    pub const GroupMatch: zcasp.validate.GroupMatchConfig(@This()) = .{
+        .validateFn = @This().validateArgs,
+    };
+};
+
 pub const Args = struct {
     pub const Verb = union(enum) {
         donut: DonutArgs,
         tail: TailArgs,
+        top: TopArgs,
     };
 
     pub const Help: help.HelpData(@This()) = .{

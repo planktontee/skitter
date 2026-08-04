@@ -11,6 +11,7 @@ const Trace = @import("skitter/Trace.zig");
 const mArgs = @import("skitter/args.zig");
 const ArgsResponse = mArgs.ArgsResponse;
 const Tail = @import("ex/tail.zig");
+const Top = @import("ex/top.zig");
 
 const DebugAlloctor = std.heap.DebugAllocator(.{});
 
@@ -113,6 +114,7 @@ pub fn trampMain(args: struct { ?Allocator, *Ctx, std.process.Init.Minimal }) !v
             argsRes.verb.?.donut.options.fps,
         ),
         .tail => try Tail.run(ctx, &grid, &term, argsRes.verb.?.tail.positionals.reminder),
+        .top => try Top.run(ctx, &grid, &term),
     }
 }
 

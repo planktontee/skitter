@@ -500,6 +500,8 @@ fn writeCellAt(self: *@This(), w: *std.Io.Writer, idx: usize) !void {
 
 const Grid = @This();
 
+const builtin = @import("builtin");
+
 test "general grid diff checks" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -507,7 +509,7 @@ test "general grid diff checks" {
     const testSeqFmt = control.testSeqFmt;
 
     var ctx: Ctx = .{
-        .debugAlloc = alloc,
+        .debugAlloc = if (builtin.mode == .Debug) alloc else {},
         .heapAlloc = alloc,
         .stackAlloc = alloc,
         .io = io,
