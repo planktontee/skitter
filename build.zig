@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("skitter.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
+        .link_libc = false,
         .strip = optimize == .ReleaseFast and !(keepSymbols orelse false),
         .omit_frame_pointer = optimize == .ReleaseFast,
     });

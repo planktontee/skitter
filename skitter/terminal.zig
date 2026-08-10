@@ -60,7 +60,7 @@ pub const Terminal = struct {
     fsOut: regent.fs.FileStream(.write),
     size: TermSize,
     trueSize: TermSize,
-    trace: ?*Trace = null,
+    trace: *Trace = undefined,
     startPos: Pos,
     mode: Mode = .fullscreen,
 

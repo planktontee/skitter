@@ -6,16 +6,20 @@ const Context = regent.ergo.Context;
 const FileCursor = regent.fs.FileCursor;
 const FileCursorConfig = regent.fs.FileCursorConfig;
 const PolicyEntry = FileCursorConfig.PolicyEntry;
+const top = @import("../top.zig");
+const ResBufAlignment = top.ResBufAlignment;
+const ResBuf = top.ResBuf;
 
-const ResBufAlignment: std.mem.Alignment = .fromByteUnits(std.atomic.cache_line);
-const ResBuf = std.ArrayListAligned(u8, ResBufAlignment);
+const log = std.log.scoped(.process);
 
 pub const Users = struct {
     buf: []align(ResBufAlignment.toByteUnits()) u8,
-    uidMap: std.AutoHashMapUnmanaged(u32, []const u8),
-    missMap: std.AutoHashMapUnmanaged(u32, []const u8) = .empty,
+    uidMap: std.HashMapUnmanaged(u32, []const u8, std.hash_map.AutoContext(u32), 99),
+    missMap: std.HashMapUnmanaged(u32, []const u8, std.hash_map.AutoContext(u32), 99) = .empty,
 
     pub const PASSWD_PATH = "/etc/passwd";
+
+    // TODO: inotify to reload users
 
     pub fn load(io: std.Io, allocator: Allocator) !Users {
         const passwdF = try std.Io.Dir.openFileAbsolute(io, PASSWD_PATH, .{ .mode = .read_only });
@@ -38,7 +42,7 @@ pub const Users = struct {
         const content = try fs.readFileRetained(allocator, &buf);
         const entryCount = std.mem.countScalar(u8, content, '\n');
 
-        var uidMap: std.AutoHashMapUnmanaged(u32, []const u8) = .empty;
+        var uidMap: @FieldType(@This(), "uidMap") = .empty;
         try uidMap.ensureTotalCapacity(allocator, std.math.cast(u32, entryCount) orelse std.math.maxInt(u32));
         errdefer uidMap.deinit(allocator);
 
@@ -83,8 +87,6 @@ pub const Users = struct {
 pub const ProcDirScanner = struct {
     procDir: std.Io.Dir,
     dirR: std.Io.Dir.Reader,
-
-    pub const PROC_PATH = "/proc";
 
     pub fn init(dir: std.Io.Dir, buf: []align(@alignOf(usize)) u8) @This() {
         return .{
@@ -148,14 +150,12 @@ pub const PidTracker = struct {
     // we already have to scan /proc anyway and we can leverage the dir as a testing mechanism
     // this is not thread safe obviously
     // Tis is 18 len essentially
-    pathBuf: [regent.fmt.decimalStrSize(u32) + PidFile.loginuid.toStr().len]u8,
+    pathBuf: [regent.fmt.decimalStrSize(u32) + PidFile.loginuid.toStr().len + 1]u8,
     pidEnd: u8,
 
     // This avoid syscalls for long-running pids
+    cacheFd: bool = true,
     statF: ?std.Io.File,
-    cmdlineF: ?std.Io.File,
-    commF: ?std.Io.File,
-    loginuidF: ?std.Io.File,
 
     pub const PidFile = enum {
         stat,
@@ -172,9 +172,6 @@ pub const PidTracker = struct {
         var self: @This() = undefined;
         self.dir = dir;
         self.statF = null;
-        self.cmdlineF = null;
-        self.commF = null;
-        self.loginuidF = null;
 
         const n = std.fmt.printInt(&self.pathBuf, pid, 10, .lower, .{});
         std.debug.assert(self.pathBuf.len > n + 1);
@@ -188,18 +185,6 @@ pub const PidTracker = struct {
         if (self.statF) |f| {
             f.close(io);
             self.statF = null;
-        }
-        if (self.cmdlineF) |f| {
-            f.close(io);
-            self.cmdlineF = null;
-        }
-        if (self.commF) |f| {
-            f.close(io);
-            self.commF = null;
-        }
-        if (self.loginuidF) |f| {
-            f.close(io);
-            self.loginuidF = null;
         }
     }
 
@@ -221,32 +206,22 @@ pub const PidTracker = struct {
                 if (self.statF) |f| return f;
                 break :r @tagName(fileTag);
             },
-            .cmdline => r: {
-                if (self.cmdlineF) |f| return f;
-                break :r @tagName(fileTag);
-            },
-            .comm => r: {
-                if (self.commF) |f| return f;
-                break :r @tagName(fileTag);
-            },
-            .loginuid => r: {
-                if (self.loginuidF) |f| return f;
-                break :r @tagName(fileTag);
-            },
+            .cmdline, .comm, .loginuid => @tagName(fileTag),
         };
 
         const f = try self.dir.openFile(io, self.makePidPath(fName), .{ .mode = .read_only });
-        switch (fileTag) {
-            .stat => self.statF = f,
-            .cmdline => self.cmdlineF = f,
-            .comm => self.commF = f,
-            .loginuid => self.loginuidF = f,
-        }
         return f;
     }
 
     fn pidFile(self: *@This(), io: std.Io, allocator: Allocator, buf: *ResBuf, fileTag: PidFile) ![]const u8 {
         const f = try self.openFile(io, fileTag);
+        defer switch (fileTag) {
+            .stat => {
+                if (self.cacheFd) self.statF = f else f.close(io);
+            },
+            .cmdline, .comm, .loginuid => f.close(io),
+        };
+
         const context: Context = .{ .io = io, .allocator = allocator };
         var fs = try regent.fs.FileStream(.read).openStreamWithConfig(
             context,
@@ -355,61 +330,105 @@ pub const PidInfo = struct {
     user: []const u8,
     // this owns this guy
     cmd: []const u8,
-    // TODO: calculate stat and drop prev
-    prevStat: StatInfo,
     currStat: StatInfo,
+    cpuPercent: f16,
+    mem: MemRes,
+    uptime: Uptime,
 
     pub fn deinit(self: *@This(), allocator: Allocator) void {
         allocator.free(self.cmd);
     }
 
-    pub fn updateOrReload(self: *@This(), tracker: *PidTracker, io: std.Io, allocator: Allocator, buf: *ResBuf, users: *Users) !void {
-        self.prevStat = self.currStat;
-        self.currStat = tracker.statInfo(io, allocator, buf) catch return error.CantStatPid;
+    pub fn updateOrReload(self: *@This(), tracker: *PidTracker, io: std.Io, allocator: Allocator, buf: *ResBuf, users: *Users) !bool {
+        var prevStat = self.currStat;
+        self.currStat = tracker.statInfo(io, allocator, buf) catch |e| {
+            log.debug("{s}, error - {s}", .{ tracker.pidAsStr(), @errorName(e) });
+            return error.CantStatPid;
+        };
 
-        if (self.prevStat.startTime == self.currStat.startTime) {
-            return;
+        if (prevStat.startTime == self.currStat.startTime) {
+            try self.updateStats(&prevStat, io);
+            return true;
         }
 
         // wipe previous allocations
         // discover pid again
         // move on
         self.deinit(allocator);
-        self.prevStat = self.currStat;
+        prevStat = self.currStat;
 
-        self.user = tracker.loginuid(io, allocator, buf, users) catch return error.CantStatPid;
+        self.user = tracker.loginuid(io, allocator, buf, users) catch |e| {
+            log.debug("{s}, error - {s}", .{ tracker.pidAsStr(), @errorName(e) });
+            return error.CantStatPid;
+        };
         self.cmd = try parseCmd(tracker, io, allocator, buf);
+        errdefer self.deinit(allocator);
+
+        try self.updateStats(&prevStat, io);
+        return false;
     }
 
-    pub fn parseCmd(tracker: *PidTracker, io: std.Io, allocator: Allocator, buf: *ResBuf) ![]const u8 {
-        var cmd: ?[]const u8 = tracker.cmdline(io, allocator, buf) catch return error.CantStatPid;
-        if (cmd == null) {
-            if (tracker.comm(io, allocator, buf) catch return error.CantStatPid) |comm|
-                cmd = comm
-            else
-                return error.CantStatPid;
-        }
-        return cmd.?;
+    fn updateStats(self: *@This(), prevStat: *const StatInfo, io: std.Io) !void {
+        self.cpuPercent = self.calculateCpuPercent(prevStat);
+        self.mem = try self.calculateMemoryTotal();
+        self.uptime = self.calculateUptime(io);
+    }
+
+    fn parseCmd(tracker: *PidTracker, io: std.Io, allocator: Allocator, buf: *ResBuf) ![]const u8 {
+        // var cmd: ?[]const u8 = tracker.cmdline(io, allocator, buf) catch |e| {
+        //     log.debug("{s}, error - {s}", .{ tracker.pidAsStr(), @errorName(e) });
+        //     return error.CantStatPid;
+        // };
+        // if (cmd == null) {
+        // if (tracker.comm(io, allocator, buf) catch |e| {
+        //     log.debug("{s}, error - {s}", .{ tracker.pidAsStr(), @errorName(e) });
+        //     return error.CantStatPid;
+        // }) |comm|
+        //     // cmd = comm
+        // else
+        //     return error.CantStatPid;
+        // }
+        // return cmd.?;
+
+        if (tracker.comm(io, allocator, buf) catch |e| {
+            log.debug("{s}, error - {s}", .{ tracker.pidAsStr(), @errorName(e) });
+            return error.CantStatPid;
+        }) |comm|
+            return comm
+        else
+            return error.CantStatPid;
     }
 
     pub fn init(tracker: *PidTracker, io: std.Io, allocator: Allocator, buf: *ResBuf, users: *Users) !@This() {
-        const user = tracker.loginuid(io, allocator, buf, users) catch return error.CantStatPid;
-        const stat = tracker.statInfo(io, allocator, buf) catch return error.CantStatPid;
+        const user = tracker.loginuid(io, allocator, buf, users) catch |e| {
+            log.debug("{s}, error - {s}", .{ tracker.pidAsStr(), @errorName(e) });
+            return error.CantStatPid;
+        };
+        const stat = tracker.statInfo(io, allocator, buf) catch |e| {
+            log.debug("{s}, error - {s}", .{ tracker.pidAsStr(), @errorName(e) });
+            return error.CantStatPid;
+        };
         const cmd = try parseCmd(tracker, io, allocator, buf);
-        return .{
+        var self: @This() = .{
             .user = user,
             .cmd = cmd,
-            .prevStat = stat,
             .currStat = stat,
+            // will be filled updateStats
+            .mem = undefined,
+            .cpuPercent = undefined,
+            .uptime = undefined,
         };
+        errdefer self.deinit(allocator);
+        try self.updateStats(&stat, io);
+        return self;
     }
 
-    pub fn cpuPercent(self: *const @This()) f16 {
-        const tDeltaMs = self.currStat.timeInMillis - self.prevStat.timeInMillis;
+    fn calculateCpuPercent(self: *const @This(), prevStat: *const StatInfo) f16 {
+        const tDeltaMs = self.currStat.timeInMillis - prevStat.timeInMillis;
         if (tDeltaMs == 0) return 0.0;
 
         const tickDelta = (self.currStat.utime + self.currStat.stime) -
-            (self.prevStat.utime + self.prevStat.stime);
+            (prevStat.utime + prevStat.stime);
 
         // standard Linux _SC_CLK_TCK
         const clkTck: f64 = 100.0;
@@ -438,7 +457,7 @@ pub const PidInfo = struct {
         };
     };
 
-    pub fn memoryTotal(self: *const @This()) !MemRes {
+    fn calculateMemoryTotal(self: *const @This()) !MemRes {
         const rss: usize = self.currStat.rss;
         var i: i8 = @intFromEnum(MemRes.MemUnit.T);
         while (i >= 0) : (i -= 1) {
@@ -465,13 +484,14 @@ pub const PidInfo = struct {
         return error.UnsupportedUnit;
     }
 
-    pub const Uptime = struct {
+    pub const Uptime = packed struct(u64) {
+        _: u20 = 0,
+        s: u6,
+        m: u6,
         h: u32,
-        m: u8,
-        s: u8,
     };
 
-    pub fn uptime(self: *const @This(), io: std.Io) Uptime {
+    fn calculateUptime(self: *const @This(), io: std.Io) Uptime {
         const currInSec: usize = @intCast(std.Io.Clock.boot.now(io).toSeconds());
         const startInSec = @divTrunc(self.currStat.startTime, 100);
 
@@ -500,13 +520,15 @@ pub const PidWatcher = struct {
         self.pidInfo = null;
     }
 
-    pub fn update(self: *@This(), io: std.Io, allocator: Allocator, buf: *ResBuf, users: *Users) !void {
-        errdefer self.pidInfo = null;
-
+    pub fn update(self: *@This(), io: std.Io, allocator: Allocator, buf: *ResBuf, users: *Users) !bool {
         if (self.pidInfo) |*pidInfo| {
-            try pidInfo.updateOrReload(&self.pidTracker, io, allocator, buf, users);
+            const before = pidInfo.*;
+            errdefer pidInfo.* = before;
+
+            return try pidInfo.updateOrReload(&self.pidTracker, io, allocator, buf, users);
         } else {
             self.pidInfo = try .init(&self.pidTracker, io, allocator, buf, users);
+            return false;
         }
     }
 
@@ -537,11 +559,14 @@ test "PidWatcher reload" {
     try testing.expectEqual(null, watcher.pidInfo);
 
     // This is good enough tbh
-    try watcher.update(io, allocator, &buf, &users);
-    try testing.expect(watcher.pidInfo.?.currStat.timeInMillis == watcher.pidInfo.?.prevStat.timeInMillis);
+    _ = try watcher.update(io, allocator, &buf, &users);
+    // same as
+    const prevStat = watcher.pidInfo.?.currStat;
+    try testing.expect(watcher.pidInfo.?.currStat.timeInMillis == prevStat.timeInMillis);
+    try testing.expectEqual(0.0, watcher.pidInfo.?.cpuPercent);
 
-    try watcher.update(io, allocator, &buf, &users);
-    try testing.expect(watcher.pidInfo.?.currStat.timeInMillis >= watcher.pidInfo.?.prevStat.timeInMillis);
+    _ = try watcher.update(io, allocator, &buf, &users);
+    try testing.expect(watcher.pidInfo.?.currStat.timeInMillis >= prevStat.timeInMillis);
 }
 
 test "PidInfo uptime" {
@@ -549,10 +574,10 @@ test "PidInfo uptime" {
     var info: PidInfo = undefined;
     info.currStat.startTime = 200;
 
-    const up = info.uptime(testing.io);
+    const up = info.calculateUptime(testing.io);
 
     try testing.expectEqual(@divFloor(timeInSec, 3600), up.h);
-    try testing.expectEqual(@divFloor(timeInSec % 3600, 60) -| 10, up.m -| 10);
+    try testing.expectEqual(@divFloor(timeInSec % 3600, 60) / 10, up.m / 10);
     try testing.expectEqual(up.s % 60, up.s);
 }
 
@@ -563,33 +588,34 @@ test "PidInfo cpuPercent" {
     info.currStat.utime = 200;
     info.currStat.timeInMillis = timeInMillis;
 
-    info.prevStat.stime = 100;
-    info.prevStat.utime = 100;
-    info.prevStat.timeInMillis = timeInMillis;
+    var prevStat: StatInfo = undefined;
+    prevStat.stime = 100;
+    prevStat.utime = 100;
+    prevStat.timeInMillis = timeInMillis;
 
-    try testing.expectEqual(0.0, info.cpuPercent());
+    try testing.expectEqual(0.0, info.calculateCpuPercent(&prevStat));
 
-    info.prevStat.timeInMillis = timeInMillis - 1000;
-    try testing.expectEqual(200, info.cpuPercent());
+    prevStat.timeInMillis = timeInMillis - 1000;
+    try testing.expectEqual(200, info.calculateCpuPercent(&prevStat));
 }
 
 test "PidInfo memoryTotal" {
     var info: PidInfo = undefined;
     info.currStat.rss = 0;
 
-    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 0, .unit = .B }, try info.memoryTotal());
+    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 0, .unit = .B }, try info.calculateMemoryTotal());
     info.currStat.rss = 1;
-    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 1, .unit = .B }, try info.memoryTotal());
+    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 1, .unit = .B }, try info.calculateMemoryTotal());
     info.currStat.rss = 10;
-    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 10, .unit = .B }, try info.memoryTotal());
+    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 10, .unit = .B }, try info.calculateMemoryTotal());
     info.currStat.rss = 999;
-    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 999, .unit = .B }, try info.memoryTotal());
+    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 999, .unit = .B }, try info.calculateMemoryTotal());
     info.currStat.rss = 1000;
-    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 0.9, .unit = .K }, try info.memoryTotal());
+    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 0.9, .unit = .K }, try info.calculateMemoryTotal());
     info.currStat.rss = 1025;
-    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 1, .unit = .K }, try info.memoryTotal());
+    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 1, .unit = .K }, try info.calculateMemoryTotal());
     info.currStat.rss = 2000;
-    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 1.9, .unit = .K }, try info.memoryTotal());
+    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 1.9, .unit = .K }, try info.calculateMemoryTotal());
 }
 
 test "parse loginuid" {
@@ -703,72 +729,4 @@ test "parse passwd" {
         expectUser,
         try users.get(testing.allocator, try std.fmt.parseInt(u32, expectUid, 10)),
     );
-}
-
-test "parse stat" {
-    const io = testing.io;
-    const allocator = testing.allocator;
-
-    const path = "/proc";
-
-    const dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true, .follow_symlinks = false, .access_sub_paths = false });
-    defer dir.close(io);
-
-    var dentsBuf: [4 << 10]u8 align(@alignOf(usize)) = undefined;
-
-    var buf: ResBuf = try .initCapacity(allocator, 4 << 10);
-    defer buf.deinit(allocator);
-
-    var users = try Users.load(testing.io, testing.allocator);
-    defer users.deinit(testing.allocator);
-
-    var pidMap: std.AutoHashMapUnmanaged(u32, PidWatcher) = .empty;
-    try pidMap.ensureTotalCapacity(allocator, 100);
-    defer {
-        var it = pidMap.iterator();
-        while (it.next()) |e| e.value_ptr.deinit(io, allocator);
-        pidMap.deinit(allocator);
-    }
-
-    for (0..60) |_| {
-        var procDirScanner: ProcDirScanner = .init(dir, &dentsBuf);
-        while (true) {
-            const pid = (try procDirScanner.nextPid(io)) orelse break;
-            const gop = try pidMap.getOrPut(allocator, pid);
-            if (!gop.found_existing) {
-                gop.value_ptr.init(dir, pid);
-            }
-            const watcher = gop.value_ptr;
-            watcher.update(io, allocator, &buf, &users) catch continue;
-            const pidInfo = &watcher.pidInfo.?;
-            const mem = try pidInfo.memoryTotal();
-            const uptime = pidInfo.uptime(io);
-
-            std.debug.print("{s}\t{s}\t{s}\t{d}\t{d:.1}%\t{d}:{d:0>2}:{d:0>2}\t{d}{s}\t{s}\n", .{
-                watcher.pidTracker.pidAsStr(),
-                pidInfo.user,
-                @tagName(pidInfo.currStat.state),
-                pidInfo.currStat.threads,
-                pidInfo.cpuPercent(),
-                uptime.h,
-                uptime.m,
-                uptime.s,
-                mem.value,
-                @tagName(mem.unit),
-                pidInfo.cmd,
-            });
-
-            watcher.survive = true;
-        }
-
-        var it = pidMap.iterator();
-        while (it.next()) |e| {
-            // reset for next run or nuke
-            if (!e.value_ptr.survive) {
-                e.value_ptr.deinit(io, allocator);
-                pidMap.removeByPtr(e.key_ptr);
-            } else e.value_ptr.survive = false;
-        }
-        try io.sleep(.fromMilliseconds(50), .awake);
-    }
 }

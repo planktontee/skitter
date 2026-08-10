@@ -8,6 +8,7 @@ const TermSize = terminal.TermSize;
 const Terminal = terminal.Terminal;
 const control = @import("control.zig");
 const regent = @import("regent");
+const Trace = @import("Trace.zig");
 
 size: TermSize,
 pos: terminal.Pos,
@@ -353,12 +354,12 @@ fn resolveCellDiff(self: *@This(), fState: *FlushState, w: *std.Io.Writer, i: us
 }
 
 pub fn flush(self: *@This(), ctx: *const Ctx, term: *Terminal) FlushError!void {
-    if (term.trace) |t| try t.metrics.append(ctx.heapAlloc, .{
-        .@"grid.buffer.size" = self.size.rows * self.size.rows,
+    try term.trace.addMetric(.{
+        .@"grid.size" = self.size.rows * self.size.cols,
     });
 
     const rctx: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.heapAlloc };
-    if (term.trace) |t| try t.pushTimer(rctx);
+    try term.trace.pushTimer(rctx.io);
 
     const w: *std.Io.Writer = &term.fsOut.stream.interface;
     const totalCells = self.size.rows * self.size.cols;
@@ -453,19 +454,19 @@ pub fn flush(self: *@This(), ctx: *const Ctx, term: *Terminal) FlushError!void {
 
         try self.resolveCellDiff(&fState, w, i, has_diff);
     }
-    if (term.trace) |t| try t.popTimer(rctx, .@"grid.diff.serialize");
+    try term.trace.popTimer(rctx.io, .@"grid.serialize");
 
     const bufferedLen = w.buffered().len;
 
-    if (term.trace) |t| try t.metrics.append(ctx.heapAlloc, .{
-        .@"grid.diff.size" = bufferedLen,
+    try term.trace.addMetric(.{
+        .@"grid.upload" = bufferedLen,
     });
 
-    if (term.trace) |t| try t.pushTimer(rctx);
+    try term.trace.pushTimer(rctx.io);
     try w.flush();
 
     if (bufferedLen > 0) self.commit();
-    if (term.trace) |t| try t.popTimer(rctx, .@"grid.diff.flush");
+    try term.trace.popTimer(rctx.io, .@"grid.flush");
 }
 
 fn toCellFmt(self: *const @This(), target: *lcell.CellFmt, idx: usize) void {
@@ -587,6 +588,10 @@ test "general grid diff checks" {
     var w: std.Io.File.Writer = undefined;
     w.interface = .fixed(&buf);
 
+    const context: regent.ergo.Context = .{ .io = testing.io, .allocator = testing.allocator };
+    var trace: Trace = try .init(context, 100, 20);
+    defer trace.deinit(context);
+
     var term: Terminal = .{
         .beforeTtyAttr = undefined,
         .fsIn = undefined,
@@ -600,6 +605,7 @@ test "general grid diff checks" {
         .trueSize = size,
         .mode = .{ .window = size },
         .startPos = pos,
+        .trace = &trace,
     };
     try grid.flush(&ctx, &term);
 

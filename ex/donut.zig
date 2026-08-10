@@ -16,8 +16,8 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, framesBySecond: usize, fps: 
 
     var frame: usize = 0;
     while (frame < framesBySecond * fps and Terminal.isRunning()) : (frame += 1) {
-        if (term.trace) |t| try t.pushTimer(context);
-        if (term.trace) |t| try t.pushTimer(context);
+        try term.trace.pushTimer(context.io);
+        try term.trace.pushTimer(context.io);
 
         @memset(&b, ' ');
         @memset(&z, 0.0);
@@ -77,7 +77,7 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, framesBySecond: usize, fps: 
                 });
             }
         }
-        if (term.trace) |t| try t.popTimer(context, .draw);
+        try term.trace.popTimer(context.io, .draw);
 
         try grid.flush(ctx, term);
 
@@ -85,15 +85,15 @@ pub fn run(ctx: *Ctx, grid: *Grid, term: *Terminal, framesBySecond: usize, fps: 
         A += 0.04;
         B += 0.02;
 
-        if (term.trace) |t| try t.popTimer(context, .@"grid.loop");
+        try term.trace.popTimer(context.io, .loop);
 
-        if (term.trace) |t| try t.pushTimer(context);
+        try term.trace.pushTimer(context.io);
 
         // draw: 1.6 ms
         // serialize: 689 micro
         // flush: 64 micro
         // -2.5ms is good enough
         try ctx.io.sleep(.fromMicroseconds(@divTrunc(@as(i64, 1000 * 1000), @as(i64, @intCast(fps))) - 2500), .awake);
-        if (term.trace) |t| try t.popTimer(context, .sleep);
+        try term.trace.popTimer(context.io, .sleep);
     }
 }

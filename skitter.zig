@@ -78,9 +78,10 @@ pub fn trampMain(args: struct { ?Allocator, *Ctx, std.process.Init.Minimal }) !v
     }
 
     const rctx: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.heapAlloc };
+    const traceCtx: regent.ergo.Context = .{ .io = ctx.io, .allocator = ctx.stackAlloc };
 
-    var trace = try Trace.init(rctx);
-    defer trace.deinit(rctx);
+    var trace = try Trace.init(traceCtx, 100, 20);
+    defer trace.deinit(traceCtx);
     defer trace.dump() catch {};
 
     var term: terminal.Terminal = try .init(
