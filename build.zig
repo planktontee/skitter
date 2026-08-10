@@ -4,14 +4,15 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const keepSymbols = b.option(bool, "keep-symbols", "Keep symbols");
+    const keepSymbols = b.option(bool, "keep-symbols", "Keep symbols") orelse false;
+    const keepTrace = b.option(bool, "keep-trace", "Keep trace file") orelse false;
 
     const module = b.addModule("skitter", .{
         .root_source_file = b.path("skitter.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = false,
-        .strip = optimize == .ReleaseFast and !(keepSymbols orelse false),
+        .strip = optimize == .ReleaseFast and !keepSymbols,
         .omit_frame_pointer = optimize == .ReleaseFast,
     });
     const regent = b.dependency("regent", .{
@@ -36,12 +37,18 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(unit_tests);
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
+    const exeOptions = b.addOptions();
+    // turning this on or building with non ReleaseFast will cause tests to override metrics.log
+    // currupting it if a process is running under the same cwd, which is fine, just annoying
+    exeOptions.addOption(bool, "trace", optimize != .ReleaseFast or keepTrace);
+
     const exe = b.addExecutable(.{
         .name = "skitter",
         .root_module = module,
         .use_llvm = true,
     });
     exe.lto = if (optimize == .Debug) .none else .full;
+    exe.root_module.addOptions("bopts", exeOptions);
 
     b.installArtifact(exe);
     b.getInstallStep().dependOn(&run_unit_tests.step);

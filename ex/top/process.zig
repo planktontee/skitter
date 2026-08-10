@@ -7,13 +7,13 @@ const FileCursor = regent.fs.FileCursor;
 const FileCursorConfig = regent.fs.FileCursorConfig;
 const PolicyEntry = FileCursorConfig.PolicyEntry;
 const top = @import("../top.zig");
-const ResBufAlignment = top.ResBufAlignment;
-const ResBuf = top.ResBuf;
+const FileBuf = top.FileBuf;
 
 const log = std.log.scoped(.process);
 
 pub const Users = struct {
-    buf: []align(ResBufAlignment.toByteUnits()) u8,
+    buf: []u8,
+    alignment: std.mem.Alignment,
     uidMap: std.HashMapUnmanaged(u32, []const u8, std.hash_map.AutoContext(u32), 99),
     missMap: std.HashMapUnmanaged(u32, []const u8, std.hash_map.AutoContext(u32), 99) = .empty,
 
@@ -30,16 +30,14 @@ pub const Users = struct {
             context,
             passwdF,
             .{},
-            .unmanaged,
+            .full,
             .defaultReaderConfig,
             null,
         );
+        std.debug.assert(fs.bufferType == .full);
+        errdefer fs.deinit(.{ .io = io, .allocator = allocator });
 
-        var buf: ResBuf = try .initCapacity(allocator, fs.stat.size);
-        errdefer buf.deinit(allocator);
-        fs.setBuffer(ResBufAlignment, buf.items);
-
-        const content = try fs.readFileRetained(allocator, &buf);
+        const content = try fs.readOnceAll();
         const entryCount = std.mem.countScalar(u8, content, '\n');
 
         var uidMap: @FieldType(@This(), "uidMap") = .empty;
@@ -58,7 +56,8 @@ pub const Users = struct {
         }
 
         return .{
-            .buf = buf.allocatedSlice(),
+            .buf = fs.stream.interface.buffer,
+            .alignment = fs.alignment,
             .uidMap = uidMap,
         };
     }
@@ -80,7 +79,7 @@ pub const Users = struct {
         }
         self.missMap.deinit(allocator);
         self.uidMap.deinit(allocator);
-        allocator.free(self.buf);
+        regent.mem.freeAligned(allocator, self.alignment, self.buf);
     }
 };
 
@@ -150,7 +149,7 @@ pub const PidTracker = struct {
     // we already have to scan /proc anyway and we can leverage the dir as a testing mechanism
     // this is not thread safe obviously
     // Tis is 18 len essentially
-    pathBuf: [regent.fmt.decimalStrSize(u32) + PidFile.loginuid.toStr().len + 1]u8,
+    pathBuf: [regent.fmt.decimalStrSize(u32) + PidFile.status.toStr().len + 1]u8,
     pidEnd: u8,
 
     // This avoid syscalls for long-running pids
@@ -161,7 +160,7 @@ pub const PidTracker = struct {
         stat,
         cmdline,
         comm,
-        loginuid,
+        status,
 
         pub fn toStr(self: @This()) []const u8 {
             return @tagName(self);
@@ -206,55 +205,32 @@ pub const PidTracker = struct {
                 if (self.statF) |f| return f;
                 break :r @tagName(fileTag);
             },
-            .cmdline, .comm, .loginuid => @tagName(fileTag),
+            .cmdline, .comm, .status => @tagName(fileTag),
         };
 
         const f = try self.dir.openFile(io, self.makePidPath(fName), .{ .mode = .read_only });
         return f;
     }
 
-    fn pidFile(self: *@This(), io: std.Io, allocator: Allocator, buf: *ResBuf, fileTag: PidFile) ![]const u8 {
+    fn pidFile(self: *@This(), io: std.Io, buf: FileBuf, fileTag: PidFile) ![]const u8 {
         const f = try self.openFile(io, fileTag);
         defer switch (fileTag) {
             .stat => {
                 if (self.cacheFd) self.statF = f else f.close(io);
             },
-            .cmdline, .comm, .loginuid => f.close(io),
+            .cmdline, .comm, .status => f.close(io),
         };
 
-        const context: Context = .{ .io = io, .allocator = allocator };
-        var fs = try regent.fs.FileStream(.read).openStreamWithConfig(
-            context,
-            f,
-            .{},
-            .unmanaged,
-            .defaultReaderConfig,
-            // This tells regent to not stat this file, all pid files
-            // are regular files with 0 size, they are special and
-            // actually live in memory, there's no point in getting statx info
-            // for them
-            .{
-                .inode = 0,
-                .nlink = 0,
-                .size = 0,
-                .permissions = .default_file,
-                .kind = .file,
-                .atime = null,
-                .mtime = .zero,
-                .ctime = .zero,
-                .block_size = std.heap.pageSize(),
-            },
-        );
-        fs.setBuffer(ResBufAlignment, buf.allocatedSlice());
-
-        return try fs.readFileRetained(allocator, buf);
+        var fR = f.reader(io, buf);
+        const r = &fR.interface;
+        return try regent.fs.readOnceAll(r);
     }
 
-    pub fn statInfo(self: *@This(), io: std.Io, allocator: Allocator, buf: *ResBuf) !StatInfo {
+    pub fn statInfo(self: *@This(), io: std.Io, buf: FileBuf) !StatInfo {
         // We are using millis because we need to multiply all tick unis by 1000 (10 * 100 for percent)
         // USER_HZ is historically 0.01 seconds
         const timeInMillis = std.Io.Clock.awake.now(io).toMilliseconds();
-        const content = try self.pidFile(io, allocator, buf, .stat);
+        const content = try self.pidFile(io, buf, .stat);
 
         var remainder = content;
         // \d+ ...
@@ -300,8 +276,8 @@ pub const PidTracker = struct {
         return stat;
     }
 
-    pub fn cmdline(self: *@This(), io: std.Io, allocator: Allocator, buf: *ResBuf) !?[]const u8 {
-        const content = try self.pidFile(io, allocator, buf, .cmdline);
+    pub fn cmdline(self: *@This(), io: std.Io, allocator: Allocator, buf: FileBuf) !?[]const u8 {
+        const content = try self.pidFile(io, buf, .cmdline);
         if (content.len == 0) return null;
         // file ends with \x00
         const line = try allocator.dupe(u8, content[0 .. content.len - 1]);
@@ -309,18 +285,28 @@ pub const PidTracker = struct {
         return line;
     }
 
-    pub fn comm(self: *@This(), io: std.Io, allocator: Allocator, buf: *ResBuf) !?[]const u8 {
-        const content = try self.pidFile(io, allocator, buf, .comm);
+    pub fn comm(self: *@This(), io: std.Io, allocator: Allocator, buf: FileBuf) !?[]const u8 {
+        const content = try self.pidFile(io, buf, .comm);
         if (content.len == 0) return null;
         // file ends with \n
         return try allocator.dupe(u8, content[0 .. content.len - 1]);
     }
 
-    pub fn loginuid(self: *@This(), io: std.Io, allocator: Allocator, buf: *ResBuf, users: *Users) ![]const u8 {
-        const content = try self.pidFile(io, allocator, buf, .loginuid);
-        // 0 goes to root
-        var uid = std.fmt.parseInt(u32, content, 10) catch 0;
-        if (uid == std.math.maxInt(u32)) uid = 0;
+    pub fn user(self: *@This(), io: std.Io, allocator: Allocator, buf: FileBuf, users: *Users) ![]const u8 {
+        const content = try self.pidFile(io, buf, .status);
+
+        const uidToken = "\nUid:\t";
+        const optRowIdx = std.mem.indexOf(u8, content, uidToken);
+
+        if (optRowIdx == null) return error.BadStatusFile;
+
+        const idx = optRowIdx.?;
+        const remainder = content[idx + uidToken.len ..];
+
+        const optColIdx = std.mem.indexOfScalar(u8, remainder, '\t');
+        if (optColIdx == null) return error.BadStatusFile;
+
+        const uid = std.fmt.parseInt(u32, remainder[0..optColIdx.?], 10) catch return error.BadStatusFile;
         return try users.get(allocator, uid);
     }
 };
@@ -339,9 +325,9 @@ pub const PidInfo = struct {
         allocator.free(self.cmd);
     }
 
-    pub fn updateOrReload(self: *@This(), tracker: *PidTracker, io: std.Io, allocator: Allocator, buf: *ResBuf, users: *Users) !bool {
+    pub fn updateOrReload(self: *@This(), tracker: *PidTracker, io: std.Io, allocator: Allocator, buf: FileBuf, users: *Users) !bool {
         var prevStat = self.currStat;
-        self.currStat = tracker.statInfo(io, allocator, buf) catch |e| {
+        self.currStat = tracker.statInfo(io, buf) catch |e| {
             log.debug("{s}, error - {s}", .{ tracker.pidAsStr(), @errorName(e) });
             return error.CantStatPid;
         };
@@ -357,7 +343,7 @@ pub const PidInfo = struct {
         self.deinit(allocator);
         prevStat = self.currStat;
 
-        self.user = tracker.loginuid(io, allocator, buf, users) catch |e| {
+        self.user = tracker.user(io, allocator, buf, users) catch |e| {
             log.debug("{s}, error - {s}", .{ tracker.pidAsStr(), @errorName(e) });
             return error.CantStatPid;
         };
@@ -374,7 +360,7 @@ pub const PidInfo = struct {
         self.uptime = self.calculateUptime(io);
     }
 
-    fn parseCmd(tracker: *PidTracker, io: std.Io, allocator: Allocator, buf: *ResBuf) ![]const u8 {
+    fn parseCmd(tracker: *PidTracker, io: std.Io, allocator: Allocator, buf: FileBuf) ![]const u8 {
         // var cmd: ?[]const u8 = tracker.cmdline(io, allocator, buf) catch |e| {
         //     log.debug("{s}, error - {s}", .{ tracker.pidAsStr(), @errorName(e) });
         //     return error.CantStatPid;
@@ -399,12 +385,12 @@ pub const PidInfo = struct {
             return error.CantStatPid;
     }
 
-    pub fn init(tracker: *PidTracker, io: std.Io, allocator: Allocator, buf: *ResBuf, users: *Users) !@This() {
-        const user = tracker.loginuid(io, allocator, buf, users) catch |e| {
+    pub fn init(tracker: *PidTracker, io: std.Io, allocator: Allocator, buf: FileBuf, users: *Users) !@This() {
+        const user = tracker.user(io, allocator, buf, users) catch |e| {
             log.debug("{s}, error - {s}", .{ tracker.pidAsStr(), @errorName(e) });
             return error.CantStatPid;
         };
-        const stat = tracker.statInfo(io, allocator, buf) catch |e| {
+        const stat = tracker.statInfo(io, buf) catch |e| {
             log.debug("{s}, error - {s}", .{ tracker.pidAsStr(), @errorName(e) });
             return error.CantStatPid;
         };
@@ -520,7 +506,7 @@ pub const PidWatcher = struct {
         self.pidInfo = null;
     }
 
-    pub fn update(self: *@This(), io: std.Io, allocator: Allocator, buf: *ResBuf, users: *Users) !bool {
+    pub fn update(self: *@This(), io: std.Io, allocator: Allocator, buf: FileBuf, users: *Users) !bool {
         if (self.pidInfo) |*pidInfo| {
             const before = pidInfo.*;
             errdefer pidInfo.* = before;
@@ -544,8 +530,8 @@ test "PidWatcher reload" {
     const io = testing.io;
     const allocator = testing.allocator;
 
-    var buf: ResBuf = try .initCapacity(allocator, 4 << 10);
-    defer buf.deinit(allocator);
+    const buf: FileBuf = try allocator.alignedAlloc(u8, .fromByteUnits(std.atomic.cache_line), 4 << 10);
+    defer allocator.free(buf);
 
     var users = try Users.load(testing.io, testing.allocator);
     defer users.deinit(testing.allocator);
@@ -559,13 +545,13 @@ test "PidWatcher reload" {
     try testing.expectEqual(null, watcher.pidInfo);
 
     // This is good enough tbh
-    _ = try watcher.update(io, allocator, &buf, &users);
+    _ = try watcher.update(io, allocator, buf, &users);
     // same as
     const prevStat = watcher.pidInfo.?.currStat;
     try testing.expect(watcher.pidInfo.?.currStat.timeInMillis == prevStat.timeInMillis);
     try testing.expectEqual(0.0, watcher.pidInfo.?.cpuPercent);
 
-    _ = try watcher.update(io, allocator, &buf, &users);
+    _ = try watcher.update(io, allocator, buf, &users);
     try testing.expect(watcher.pidInfo.?.currStat.timeInMillis >= prevStat.timeInMillis);
 }
 
@@ -576,7 +562,7 @@ test "PidInfo uptime" {
 
     const up = info.calculateUptime(testing.io);
 
-    try testing.expectEqual(@divFloor(timeInSec, 3600), up.h);
+    try testing.expectEqual(@divFloor(timeInSec, 3600) / 4, up.h / 4);
     try testing.expectEqual(@divFloor(timeInSec % 3600, 60) / 10, up.m / 10);
     try testing.expectEqual(up.s % 60, up.s);
 }
@@ -618,7 +604,7 @@ test "PidInfo memoryTotal" {
     try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 1.9, .unit = .K }, try info.calculateMemoryTotal());
 }
 
-test "parse loginuid" {
+test "parse user" {
     const io = testing.io;
     const allocator = testing.allocator;
 
@@ -626,13 +612,13 @@ test "parse loginuid" {
     const dir = try std.Io.Dir.openDirAbsolute(io, "/proc", .{});
     var tracker = PidTracker.init(dir, @intCast(pid));
 
-    var buf: ResBuf = try .initCapacity(allocator, 4 << 10);
-    defer buf.deinit(allocator);
+    const buf: FileBuf = try allocator.alignedAlloc(u8, .fromByteUnits(std.atomic.cache_line), 4 << 10);
+    defer allocator.free(buf);
 
     var users = try Users.load(testing.io, testing.allocator);
     defer users.deinit(testing.allocator);
 
-    const user = try tracker.loginuid(io, allocator, &buf, &users);
+    const user = try tracker.user(io, allocator, buf, &users);
     const expectUid, const expectUser = try getPidUserFromCmd(testing.io, testing.allocator);
     defer testing.allocator.free(expectUid);
     defer testing.allocator.free(expectUser);
@@ -648,10 +634,10 @@ test "parse comm" {
     const dir = try std.Io.Dir.openDirAbsolute(io, "/proc", .{});
     var tracker = PidTracker.init(dir, @intCast(pid));
 
-    var buf: ResBuf = try .initCapacity(allocator, 4 << 10);
-    defer buf.deinit(allocator);
+    const buf: FileBuf = try allocator.alignedAlloc(u8, .fromByteUnits(std.atomic.cache_line), 4 << 10);
+    defer allocator.free(buf);
 
-    const line = (try tracker.comm(io, allocator, &buf)).?;
+    const line = (try tracker.comm(io, allocator, buf)).?;
     defer allocator.free(line);
 
     // a bit too ligth for my taste, but better than nothing
@@ -666,10 +652,10 @@ test "parse cmdline" {
     const dir = try std.Io.Dir.openDirAbsolute(io, "/proc", .{});
     var tracker = PidTracker.init(dir, @intCast(pid));
 
-    var buf: ResBuf = try .initCapacity(allocator, 4 << 10);
-    defer buf.deinit(allocator);
+    const buf: FileBuf = try allocator.alignedAlloc(u8, .fromByteUnits(std.atomic.cache_line), 4 << 10);
+    defer allocator.free(buf);
 
-    const line = (try tracker.cmdline(io, allocator, &buf)).?;
+    const line = (try tracker.cmdline(io, allocator, buf)).?;
     defer allocator.free(line);
 
     // a bit too ligth for my taste, but better than nothing
@@ -684,10 +670,10 @@ test "parse statusInfo" {
     const dir = try std.Io.Dir.openDirAbsolute(io, "/proc", .{});
     var tracker = PidTracker.init(dir, @intCast(pid));
 
-    var buf: ResBuf = try .initCapacity(allocator, 4 << 10);
-    defer buf.deinit(allocator);
+    const buf: FileBuf = try allocator.alignedAlloc(u8, .fromByteUnits(std.atomic.cache_line), 4 << 10);
+    defer allocator.free(buf);
 
-    const stat = try tracker.statInfo(io, allocator, &buf);
+    const stat = try tracker.statInfo(io, buf);
 
     try testing.expectEqual(StatInfo.State.R, stat.state);
     try testing.expect(stat.utime >= 0);

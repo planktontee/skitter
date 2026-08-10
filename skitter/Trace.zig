@@ -1,10 +1,9 @@
 const std = @import("std");
 const regent = @import("regent");
 const RotType = regent.ergo.RotType;
-// const isDebug = regent.ergo.isDebug;
+const traceEnabled = @import("bopts").trace;
 const BUnit = regent.units.ByteUnit;
 
-const isDebug = regent.ergo.isDebug;
 pub const Metric = union(enum) {
     draw: Duration,
     sleep: Duration,
@@ -25,17 +24,17 @@ pub const Metric = union(enum) {
     pub const Duration = i96;
 };
 
-fs: RotType(isDebug, regent.fs.FileStream(.write)),
-metricsI: RotType(isDebug, usize),
-metrics: RotType(isDebug, []Metric),
-timersI: RotType(isDebug, usize),
-timers: RotType(isDebug, []std.Io.Timestamp),
-clock: RotType(isDebug, std.Io.Clock),
+fs: RotType(traceEnabled, regent.fs.FileStream(.write)),
+metricsI: RotType(traceEnabled, usize),
+metrics: RotType(traceEnabled, []Metric),
+timersI: RotType(traceEnabled, usize),
+timers: RotType(traceEnabled, []std.Io.Timestamp),
+clock: RotType(traceEnabled, std.Io.Clock),
 
 pub const DEFAULT_FILE_NAME: []const u8 = "metrics.log";
 
 pub fn init(context: regent.ergo.Context, metrics: usize, timers: usize) !@This() {
-    if (!isDebug) return undefined;
+    if (!traceEnabled) return undefined;
 
     const cwd = std.Io.Dir.cwd();
     const file = try cwd.createFile(context.io, DEFAULT_FILE_NAME, .{
@@ -61,9 +60,9 @@ pub fn init(context: regent.ergo.Context, metrics: usize, timers: usize) !@This(
 }
 
 pub fn dump(self: *@This()) !void {
-    if (!isDebug) return;
+    if (!traceEnabled) return;
 
-    for (self.metrics) |metric|
+    for (self.metrics[0..self.metricsI]) |metric|
         switch (metric) {
             inline else => |value| try self.fs.stream.interface.print("{s},{d}\n", .{ @tagName(metric), value }),
         };
@@ -72,9 +71,10 @@ pub fn dump(self: *@This()) !void {
 }
 
 pub fn addMetric(self: *@This(), metric: Metric) !void {
-    if (!isDebug) return;
+    if (!traceEnabled) return;
 
-    if (self.metricsI >= self.metrics.len) {
+    std.debug.assert(self.metricsI <= self.metrics.len);
+    if (self.metricsI == self.metrics.len) {
         try self.dump();
     }
 
@@ -83,7 +83,7 @@ pub fn addMetric(self: *@This(), metric: Metric) !void {
 }
 
 pub fn pushTimer(self: *@This(), io: std.Io) !void {
-    if (!isDebug) return;
+    if (!traceEnabled) return;
 
     if (self.timersI + 1 >= self.timers.len) return error.TimersCapacityFull;
 
@@ -92,7 +92,7 @@ pub fn pushTimer(self: *@This(), io: std.Io) !void {
 }
 
 pub fn popTimer(self: *@This(), io: std.Io, comptime tag: std.meta.Tag(Metric)) !void {
-    if (!isDebug) return;
+    if (!traceEnabled) return;
 
     if (self.timersI == 0) return;
 
@@ -106,7 +106,7 @@ pub fn popTimer(self: *@This(), io: std.Io, comptime tag: std.meta.Tag(Metric)) 
 }
 
 pub fn deinit(self: *@This(), context: regent.ergo.Context) void {
-    if (!isDebug) return;
+    if (!traceEnabled) return;
 
     context.allocator.free(self.metrics);
     context.allocator.free(self.timers);

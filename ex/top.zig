@@ -14,7 +14,7 @@ const PidWatcher = proc.PidWatcher;
 const ProcDirScanner = proc.ProcDirScanner;
 const RotType = regent.ergo.RotType;
 const rotValue = regent.ergo.rotValue;
-// const isDebug = regent.ergo.isDebug;
+const traceEnabled = @import("bopts").trace;
 const pack = regent.fmt.pack;
 const unpack = regent.fmt.unpack;
 const assert = std.debug.assert;
@@ -42,7 +42,11 @@ const PidRankKey = packed struct(u64) {
         // max 999 * 10 + 9, technically 9999 is not possible by the alg
         // but supported by the number
         const memVal: u14 = @intFromFloat(@trunc(mem.value * 10));
-        assert(memVal <= 9990);
+        // TODO: figure out why this is happening, coredump+debug is not helping
+        assertM(memVal <= 9990, r: {
+            var buf: [256]u8 = undefined;
+            break :r try std.fmt.bufPrint(&buf, "Unexpected memory value {d}\n", .{memVal});
+        });
         assert(pid <= std.math.maxInt(u22));
 
         return .{
@@ -54,36 +58,30 @@ const PidRankKey = packed struct(u64) {
     }
 };
 
-pub const PidUptimeRankKey = packed struct(u64) {
+pub const PidStartTimeRankKey = packed struct(u64) {
     pid: u22,
-    // highest 4 bits
-    s: u4,
-    m: u6,
-    h: u32,
+    // 1.3k + years worth of granularity
+    startTime: u42,
 
     pub fn from(pid: u32, pidInfo: *const PidInfo) @This() {
-        return .fromUptime(pid, pidInfo.uptime);
+        return .fromStartTime(pid, pidInfo.currStat.startTime);
     }
 
-    pub fn fromUptime(pid: u32, uptime: proc.PidInfo.Uptime) @This() {
+    pub fn fromStartTime(pid: u32, startTime: usize) @This() {
         return .{
             .pid = @intCast(pid),
-            .s = @intCast((uptime.s & 0b111100) >> 2),
-            .m = uptime.m,
-            .h = uptime.h,
+            .startTime = @intCast(startTime >> 22),
         };
     }
 };
 
-pub const ResBufAlignment: std.mem.Alignment = .fromByteUnits(std.atomic.cache_line);
-pub const ResBuf = std.ArrayListAligned(u8, ResBufAlignment);
+pub const FileBuf = []align(std.atomic.cache_line) u8;
 const log = std.log.scoped(.top);
-const isDebug = regent.ergo.isDebug;
 
 procDir: std.Io.Dir,
 dentsBuf: []align(@alignOf(usize)) u8,
-fdCache: regent.collections.STree(.lt, u64, void),
-ioBuf: ResBuf,
+fdCache: regent.collections.STree(.gt, u64, void),
+ioBuf: FileBuf,
 users: Users,
 pidMap: std.HashMapUnmanaged(u32, PidWatcher, std.hash_map.AutoContext(u32), 99),
 pidRank: regent.collections.BPlusTree(.gt, u64, void),
@@ -109,8 +107,8 @@ pub fn init(ctx: *const Ctx) !@This() {
     var fdCache: @FieldType(@This(), "fdCache") = try .init(scrapAlloc, 1000);
     errdefer fdCache.deinit(scrapAlloc);
 
-    var ioBuf: ResBuf = try .initCapacity(allocator, 4 * BUnit.kb);
-    errdefer ioBuf.deinit(allocator);
+    const ioBuf: FileBuf = try scrapAlloc.alignedAlloc(u8, .fromByteUnits(std.atomic.cache_line), 4 * BUnit.kb);
+    errdefer scrapAlloc.free(ioBuf);
 
     return .{
         .procDir = dir,
@@ -131,9 +129,9 @@ pub fn deinit(self: *@This(), ctx: *const Ctx) void {
     const scrapAlloc = ctx.stackAlloc;
     scrapAlloc.free(self.dentsBuf);
     self.fdCache.deinit(scrapAlloc);
+    scrapAlloc.free(self.ioBuf);
 
     const allocator = ctx.heapAlloc;
-    self.ioBuf.deinit(allocator);
     self.users.deinit(allocator);
 
     var it = self.pidMap.iterator();
@@ -143,14 +141,14 @@ pub fn deinit(self: *@This(), ctx: *const Ctx) void {
     self.pidRank.deinit(allocator);
 }
 
-fn getPrevData(watcher: *const PidWatcher, pid: u32) !struct { ?PidRankKey, ?proc.PidInfo.Uptime } {
+fn getPrevData(watcher: *const PidWatcher, pid: u32) !struct { ?PidRankKey, ?usize } {
     return if (watcher.pidInfo == null)
         .{ null, null }
     else r: {
         const prevPidInfo = &watcher.pidInfo.?;
         break :r .{
             try PidRankKey.from(pid, prevPidInfo),
-            prevPidInfo.uptime,
+            prevPidInfo.currStat.startTime,
         };
     };
 }
@@ -177,24 +175,29 @@ fn lruFd(
     newFdK: u64,
 ) void {
     var fdIt = self.fdCache.iterator();
-    const smallestK: PidUptimeRankKey = @bitCast(fdIt.next().?.key);
-    if (newFdK > pack(smallestK)) {
-        assert(self.fdCache.remove(@bitCast(smallestK)) != null);
+    const biggestK: PidStartTimeRankKey = @bitCast(fdIt.next().?.key);
+    if (newFdK < pack(biggestK)) {
+        assert(self.fdCache.remove(@bitCast(biggestK)) != null);
 
-        const tracker: *PidTracker = &self.pidMap.getPtr(smallestK.pid).?.pidTracker;
+        const tracker: *PidTracker = &self.pidMap.getPtr(biggestK.pid).?.pidTracker;
         tracker.cacheFd = false;
         tracker.close(io);
         assert(tracker.statF == null);
     }
 }
 
-fn toggleFdCache(self: *@This(), io: std.Io, watcher: *PidWatcher, pid: u32, optPrevUptime: ?proc.PidInfo.Uptime) !void {
+fn toggleFdCache(self: *@This(), io: std.Io, watcher: *PidWatcher, pid: u32, optPrevStartTime: ?usize) !void {
+    const newFdK = PidStartTimeRankKey.from(pid, &watcher.pidInfo.?);
+
     var wasFdCached = false;
-    if (optPrevUptime) |prevUptime| {
-        const oldFdK = PidUptimeRankKey.fromUptime(pid, prevUptime);
+    if (optPrevStartTime) |prevUptime| {
+        const oldFdK = PidStartTimeRankKey.fromStartTime(pid, prevUptime);
+
+        // no need to rebalance existing pids if it's in the cache
+        if (oldFdK == newFdK and self.fdCache.contains(pack(newFdK))) return;
 
         if (self.fdCache.remove(@bitCast(oldFdK)) != null) {
-            if (isDebug) {
+            if (traceEnabled) {
                 const tracker: *PidTracker = &self.pidMap.getPtr(oldFdK.pid).?.pidTracker;
                 assert(tracker.cacheFd == true);
             }
@@ -202,50 +205,50 @@ fn toggleFdCache(self: *@This(), io: std.Io, watcher: *PidWatcher, pid: u32, opt
         }
     }
 
-    const newFdK = PidUptimeRankKey.from(pid, &watcher.pidInfo.?);
     if (!wasFdCached and self.fdCache.isSaturated())
         self.lruFd(io, @bitCast(newFdK))
     else {
+        // we removed a previously cached entry, we can insert this one, it will be replaced in subsequent runs
         watcher.pidTracker.cacheFd = true;
         assert((try self.fdCache.insert(@bitCast(newFdK), {})) == null);
     }
 }
 
 pub fn sweepPids(self: *@This(), io: std.Io, allocator: Allocator, term: *Terminal) !void {
-    var delta: RotType(isDebug, std.Io.Timestamp) = rotValue(isDebug, undefined);
-    var elpPidSweep: RotType(isDebug, std.Io.Timestamp) = rotValue(isDebug, std.Io.Timestamp.zero);
-    var elpRank: RotType(isDebug, std.Io.Timestamp) = rotValue(isDebug, std.Io.Timestamp.zero);
-    var elpFdCache: RotType(isDebug, std.Io.Timestamp) = rotValue(isDebug, std.Io.Timestamp.zero);
+    var delta: RotType(traceEnabled, std.Io.Timestamp) = rotValue(traceEnabled, undefined);
+    var elpPidSweep: RotType(traceEnabled, std.Io.Timestamp) = rotValue(traceEnabled, std.Io.Timestamp.zero);
+    var elpRank: RotType(traceEnabled, std.Io.Timestamp) = rotValue(traceEnabled, std.Io.Timestamp.zero);
+    var elpFdCache: RotType(traceEnabled, std.Io.Timestamp) = rotValue(traceEnabled, std.Io.Timestamp.zero);
 
     var procDirScanner: ProcDirScanner = .init(self.procDir, self.dentsBuf);
     while (Terminal.isRunning()) {
-        if (isDebug) delta = self.clock.now(io);
+        if (traceEnabled) delta = self.clock.now(io);
         const pid = (try procDirScanner.nextPid(io)) orelse break;
 
         const gopR = try self.pidMap.getOrPut(allocator, pid);
         if (!gopR.found_existing) gopR.value_ptr.init(self.procDir, pid);
 
         const watcher = gopR.value_ptr;
-        const optPrevK: ?PidRankKey, const optPrevUptime: ?proc.PidInfo.Uptime = try getPrevData(watcher, pid);
+        const optPrevK: ?PidRankKey, const optPrevStartTime: ?usize = try getPrevData(watcher, pid);
 
-        _ = watcher.update(io, allocator, &self.ioBuf, &self.users) catch |e| {
+        _ = watcher.update(io, allocator, self.ioBuf, &self.users) catch |e| {
             watcher.survive = false;
             log.debug("{d}, Failed to load pid information - {s}", .{ pid, @errorName(e) });
             continue;
         };
         watcher.survive = true;
-        if (isDebug) elpPidSweep = elpPidSweep.addDuration(delta.untilNow(io, self.clock));
+        if (traceEnabled) elpPidSweep = elpPidSweep.addDuration(delta.untilNow(io, self.clock));
 
-        if (isDebug) delta = self.clock.now(io);
+        if (traceEnabled) delta = self.clock.now(io);
         try self.rankPid(allocator, watcher, pid, optPrevK);
-        if (isDebug) elpRank = elpRank.addDuration(delta.untilNow(io, self.clock));
+        if (traceEnabled) elpRank = elpRank.addDuration(delta.untilNow(io, self.clock));
 
-        if (isDebug) delta = self.clock.now(io);
-        try self.toggleFdCache(io, watcher, pid, optPrevUptime);
-        if (isDebug) elpFdCache = elpFdCache.addDuration(delta.untilNow(io, self.clock));
+        if (traceEnabled) delta = self.clock.now(io);
+        try self.toggleFdCache(io, watcher, pid, optPrevStartTime);
+        if (traceEnabled) elpFdCache = elpFdCache.addDuration(delta.untilNow(io, self.clock));
     }
 
-    if (isDebug) {
+    if (traceEnabled) {
         try term.trace.addMetric(.{ .@"top.pid.sweep" = elpPidSweep.nanoseconds });
         try term.trace.addMetric(.{ .@"top.rank" = elpRank.nanoseconds });
         try term.trace.addMetric(.{ .@"top.fdCache" = elpFdCache.nanoseconds });
@@ -253,7 +256,7 @@ pub fn sweepPids(self: *@This(), io: std.Io, allocator: Allocator, term: *Termin
 }
 
 pub fn updateCaches(self: *@This(), io: std.Io, allocator: Allocator, term: *Terminal) !void {
-    if (isDebug) try term.trace.pushTimer(io);
+    if (traceEnabled) try term.trace.pushTimer(io);
 
     var it = self.pidMap.iterator();
     while (it.next()) |e| {
@@ -263,7 +266,7 @@ pub fn updateCaches(self: *@This(), io: std.Io, allocator: Allocator, term: *Ter
                 const pid = e.key_ptr.*;
                 const pidInfo = &e.value_ptr.pidInfo.?;
                 const k = try PidRankKey.from(pid, pidInfo);
-                const fdK = PidUptimeRankKey.from(pid, pidInfo);
+                const fdK = PidStartTimeRankKey.from(pid, pidInfo);
                 assert(self.pidRank.remove(@bitCast(k)) != null);
                 _ = self.fdCache.remove(@bitCast(fdK));
             }
@@ -275,7 +278,7 @@ pub fn updateCaches(self: *@This(), io: std.Io, allocator: Allocator, term: *Ter
     assert(self.pidMap.size == self.pidRank.size);
     assert(@min(self.pidMap.size, self.fdCache.capacity) == self.fdCache.size);
 
-    if (isDebug) {
+    if (traceEnabled) {
         try term.trace.popTimer(io, .@"top.col.maint");
         try term.trace.addMetric(.{ .@"top.fd.size" = self.fdCache.size });
         try term.trace.addMetric(.{ .@"top.map.size" = self.pidMap.size });
@@ -311,10 +314,10 @@ pub fn writeLineToGrid(allocator: std.mem.Allocator, grid: *Grid, lineN: usize, 
 pub fn drawTopN(self: *@This(), io: std.Io, allocator: Allocator, grid: *Grid, term: *Terminal) !void {
     const topN = term.size.rows;
 
-    var delta: RotType(isDebug, std.Io.Timestamp) = rotValue(isDebug, undefined);
-    var elpTopN: RotType(isDebug, std.Io.Timestamp) = rotValue(isDebug, std.Io.Timestamp.zero);
-    var elpDraw: RotType(isDebug, std.Io.Timestamp) = rotValue(isDebug, std.Io.Timestamp.zero);
-    if (isDebug) delta = self.clock.now(io);
+    var delta: RotType(traceEnabled, std.Io.Timestamp) = rotValue(traceEnabled, undefined);
+    var elpTopN: RotType(traceEnabled, std.Io.Timestamp) = rotValue(traceEnabled, std.Io.Timestamp.zero);
+    var elpDraw: RotType(traceEnabled, std.Io.Timestamp) = rotValue(traceEnabled, std.Io.Timestamp.zero);
+    if (traceEnabled) delta = self.clock.now(io);
 
     var blockIt = self.pidRank.blockIterator();
     var remaining: usize = topN;
@@ -322,11 +325,11 @@ pub fn drawTopN(self: *@This(), io: std.Io, allocator: Allocator, grid: *Grid, t
         const target = @min(remaining, block.keys.len);
         for (block.keys[0..target], 0..) |packedK, i| {
             const key = unpack(PidRankKey, packedK);
-            if (isDebug) elpTopN = elpTopN.addDuration(delta.untilNow(io, self.clock));
+            if (traceEnabled) elpTopN = elpTopN.addDuration(delta.untilNow(io, self.clock));
 
-            if (isDebug) delta = self.clock.now(io);
+            if (traceEnabled) delta = self.clock.now(io);
             try writeLineToGrid(allocator, grid, topN - remaining + i, self.pidMap.getPtr(key.pid).?);
-            if (isDebug) {
+            if (traceEnabled) {
                 elpDraw = elpDraw.addDuration(delta.untilNow(io, self.clock));
                 delta = self.clock.now(io);
             }
@@ -336,7 +339,7 @@ pub fn drawTopN(self: *@This(), io: std.Io, allocator: Allocator, grid: *Grid, t
         if (remaining == 0) break;
     }
 
-    if (isDebug) {
+    if (traceEnabled) {
         elpTopN = elpTopN.addDuration(delta.untilNow(io, self.clock));
         try term.trace.addMetric(.{ .@"top.top.n" = elpTopN.nanoseconds });
         try term.trace.addMetric(.{ .draw = elpDraw.nanoseconds });
@@ -374,7 +377,7 @@ pub fn run(ctx: *const Ctx, grid: *Grid, term: *Terminal) !void {
             break;
         }
 
-        if (isDebug) try term.trace.popTimer(io, .loop);
+        if (traceEnabled) try term.trace.popTimer(io, .loop);
 
         // xxx micros
         try grid.flush(ctx, term);
