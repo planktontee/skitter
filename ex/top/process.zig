@@ -8,6 +8,8 @@ const FileCursorConfig = regent.fs.FileCursorConfig;
 const PolicyEntry = FileCursorConfig.PolicyEntry;
 const top = @import("../top.zig");
 const FileBuf = top.FileBuf;
+const unpack = regent.fmt.unpack;
+const pack = regent.fmt.pack;
 
 const log = std.log.scoped(.process);
 
@@ -445,24 +447,28 @@ pub const PidInfo = struct {
 
     fn calculateMemoryTotal(self: *const @This()) !MemRes {
         const rss: usize = self.currStat.rss;
-        var i: i8 = @intFromEnum(MemRes.MemUnit.T);
-        while (i >= 0) : (i -= 1) {
-            var unit = @as(MemRes.MemUnit, @enumFromInt(i));
+        comptime var i = pack(MemRes.MemUnit.T);
+        inline while (true) : (if (i > 0) {
+            i -= 1;
+        } else break) {
+            var unit = comptime unpack(MemRes.MemUnit, i);
             // 0 doesnt fit 1b unit :p
             if (@max(1, rss) >= unit.unit()) {
-                var r = @as(f64, @floatFromInt(rss)) / @as(f64, @floatFromInt(unit.unit()));
+                var v = @as(f64, @floatFromInt(rss)) / @as(f64, @floatFromInt(unit.unit()));
+                var r: f16 = undefined;
                 // Mibibytes / kibibytes can go up to 1k+ and not breach the next unit
-                if (r >= 1000) {
-                    unit = @as(MemRes.MemUnit, @enumFromInt(i + 1));
-                    r = r / 1024.0;
-                    r = regent.fmt.floatTrunc(f64, r, 1);
-                } else if (r >= 10.0) {
-                    r = @trunc(r);
+                if (v >= 1000.0) {
+                    if (comptime unpack(MemRes.MemUnit, i) == .T) return error.MemoryTooLarge;
+                    unit = comptime unpack(MemRes.MemUnit, i + 1);
+                    v = v / 1024.0;
+                    r = regent.fmt.floatTrunc(f16, @floatCast(v), 1);
+                } else if (v >= 10.0) {
+                    r = @trunc(@as(f16, @floatCast(v)));
                 } else {
-                    r = regent.fmt.floatTrunc(f64, r, 1);
+                    r = regent.fmt.floatTrunc(f16, @floatCast(v), 1);
                 }
                 return .{
-                    .value = @floatCast(r),
+                    .value = r,
                     .unit = unit,
                 };
             }
