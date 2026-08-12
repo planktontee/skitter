@@ -41,18 +41,16 @@ const PidRankKey = packed struct(u64) {
         const mem = pidInfo.mem;
         // max 999 * 10 + 9, technically 9999 is not possible by the alg
         // but supported by the number
-        const memVal: u14 = @intFromFloat(@trunc(mem.value * 10));
-        // TODO: figure out why this is happening, coredump+debug is not helping
-        assertM(memVal <= 9990, r: {
+        assertM(mem.value <= 9990, r: {
             var buf: [256]u8 = undefined;
-            break :r try std.fmt.bufPrint(&buf, "Unexpected memory value {d}\n", .{memVal});
+            break :r try std.fmt.bufPrint(&buf, "Unexpected memory value {d}\n", .{mem.value});
         });
         assert(pid <= std.math.maxInt(u22));
 
         return .{
             .cpu = cpu,
             .unit = mem.unit,
-            .mem = memVal,
+            .mem = mem.value,
             .pid = @intCast(pid),
         };
     }
@@ -300,7 +298,8 @@ pub fn writeLineToGrid(allocator: std.mem.Allocator, grid: *Grid, lineN: usize, 
         uptime.h,
         uptime.m,
         uptime.s,
-        mem.value,
+        // this is fine for now
+        @as(f32, @floatFromInt(mem.value)) / 10,
         @tagName(mem.unit),
         pidInfo.cmd,
     });

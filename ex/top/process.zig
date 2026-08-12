@@ -319,7 +319,7 @@ pub const PidInfo = struct {
     // this owns this guy
     cmd: []const u8,
     currStat: StatInfo,
-    cpuPercent: f16,
+    cpuPercent: f32,
     mem: MemRes,
     uptime: Uptime,
 
@@ -429,7 +429,7 @@ pub const PidInfo = struct {
     }
 
     pub const MemRes = struct {
-        value: f16,
+        value: u14,
         unit: MemUnit,
 
         pub const MemUnit = enum(u3) {
@@ -455,18 +455,19 @@ pub const PidInfo = struct {
             // 0 doesnt fit 1b unit :p
             if (@max(1, rss) >= unit.unit()) {
                 var v = @as(f64, @floatFromInt(rss)) / @as(f64, @floatFromInt(unit.unit()));
-                var r: f16 = undefined;
+                var r: u14 = undefined;
                 // Mibibytes / kibibytes can go up to 1k+ and not breach the next unit
                 if (v >= 1000.0) {
                     if (comptime unpack(MemRes.MemUnit, i) == .T) return error.MemoryTooLarge;
                     unit = comptime unpack(MemRes.MemUnit, i + 1);
                     v = v / 1024.0;
-                    r = regent.fmt.floatTrunc(f16, @floatCast(v), 1);
-                } else if (v >= 10.0) {
-                    r = @trunc(@as(f16, @floatCast(v)));
-                } else {
-                    r = regent.fmt.floatTrunc(f16, @floatCast(v), 1);
-                }
+                    // this is guaranteed to be < 1
+                    r = @intFromFloat(@trunc(v * 10));
+                } else if (v >= 10.0)
+                    r = @as(u14, @intFromFloat(@trunc(v))) * 10
+                else
+                    r = @intFromFloat(@trunc(v * 10));
+
                 return .{
                     .value = r,
                     .unit = unit,
@@ -597,17 +598,17 @@ test "PidInfo memoryTotal" {
 
     try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 0, .unit = .B }, try info.calculateMemoryTotal());
     info.currStat.rss = 1;
-    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 1, .unit = .B }, try info.calculateMemoryTotal());
-    info.currStat.rss = 10;
     try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 10, .unit = .B }, try info.calculateMemoryTotal());
+    info.currStat.rss = 10;
+    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 100, .unit = .B }, try info.calculateMemoryTotal());
     info.currStat.rss = 999;
-    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 999, .unit = .B }, try info.calculateMemoryTotal());
+    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 9990, .unit = .B }, try info.calculateMemoryTotal());
     info.currStat.rss = 1000;
-    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 0.9, .unit = .K }, try info.calculateMemoryTotal());
+    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 9, .unit = .K }, try info.calculateMemoryTotal());
     info.currStat.rss = 1025;
-    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 1, .unit = .K }, try info.calculateMemoryTotal());
+    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 10, .unit = .K }, try info.calculateMemoryTotal());
     info.currStat.rss = 2000;
-    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 1.9, .unit = .K }, try info.calculateMemoryTotal());
+    try regent.testing.expectEqualDeep(PidInfo.MemRes, .{ .value = 19, .unit = .K }, try info.calculateMemoryTotal());
 }
 
 test "parse user" {
