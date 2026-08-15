@@ -110,8 +110,35 @@ pub fn scrollUp(self: *@This()) void {
     }
 }
 
-pub fn putAndSplatInRow(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cell: tag.concreteType()) PutResult {
-    const r = self.put(x, y, tag, cell);
+pub fn putAndSplatUpTo(self: *@This(), x: usize, y: usize, cols: usize, comptime tag: lcell.CellMode, cell: tag.concreteType()) !PutResult {
+    const r = try self.put(x, y, tag, cell);
+    switch (r) {
+        .putOne => {},
+        .putMany => return error.CantSplatMultiCell,
+        .putToEndOfLine => return r,
+    }
+
+    const pos = try self.splatCellUpTo(x, y, cols);
+    if (pos.x == self.size.cols - 1)
+        return .{ .putToEndOfLine = pos }
+    else
+        return .{ .putMany = pos };
+}
+
+pub fn putCellAndSplatUpTo(self: *@This(), x: usize, y: usize, cols: usize, cell: *const Cell) !PutResult {
+    return switch (cell.mode) {
+        inline else => |t| self.putAndSplatUpTo(
+            x,
+            y,
+            cols,
+            t,
+            cell.data.get(t),
+        ),
+    };
+}
+
+pub fn putAndSplatInRow(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cell: tag.concreteType()) !PutResult {
+    const r = try self.put(x, y, tag, cell);
     switch (r) {
         .putOne => {},
         .putMany => return r,
@@ -141,6 +168,25 @@ pub fn splatCellInRow(self: *@This(), x: usize, y: usize) ?PutResult.Position {
     }
 
     return .{ .x = self.size.cols - 1, .y = y };
+}
+
+pub fn splatCellUpTo(self: *@This(), x: usize, y: usize, cols: usize) !PutResult.Position {
+    std.debug.assert(y < self.size.rows);
+    if (x + cols >= self.size.cols) return error.TooManyCellsRequested;
+
+    const idx = y * self.size.cols + x;
+    const start = idx + 1;
+    const end = y * self.size.cols + cols + 1;
+    const fields = comptime simdFields();
+    comptime var i: usize = 0;
+    inline while (i < fields.len) : (i += 2) {
+        @memset(
+            @field(self, fields[i])[start..end],
+            @field(self, fields[i])[idx],
+        );
+    }
+
+    return .{ .x = x + cols - 1, .y = y };
 }
 
 fn splatStyleTo(self: *@This(), idx: usize, end: usize) void {
@@ -227,6 +273,17 @@ pub fn putBlank(self: *@This(), x: usize, y: usize) PutError!PutResult {
 
 pub fn putBreakLine(self: *@This(), x: usize, y: usize) PutError!PutResult {
     return self.put(x, y, .glyph, '\n');
+}
+
+pub fn putCell(self: *@This(), x: usize, y: usize, cell: *const Cell) PutError!PutResult {
+    return switch (cell.mode) {
+        inline else => |t| self.put(
+            x,
+            y,
+            t,
+            cell.data.get(t),
+        ),
+    };
 }
 
 pub fn put(self: *@This(), x: usize, y: usize, comptime tag: lcell.CellMode, cell: tag.concreteType()) PutError!PutResult {

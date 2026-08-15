@@ -21,6 +21,7 @@ const assert = std.debug.assert;
 const assertM = regent.ergo.assertM;
 const BUnit = regent.units.ByteUnit;
 const Allocator = std.mem.Allocator;
+const SimpleBorder = @import("../skitter/components.zig").SimpleBorder;
 
 const PidRankKey = packed struct(u64) {
     _: u7 = 0,
@@ -285,11 +286,52 @@ pub fn updateCaches(self: *@This(), io: std.Io, allocator: Allocator, term: *Ter
 }
 
 pub fn writeLineToGrid(allocator: std.mem.Allocator, grid: *Grid, lineN: usize, watcher: *const PidWatcher) !void {
+    if (lineN == grid.size.rows - 1) return;
+
+    var l = lineN;
+    const sborder: SimpleBorder = .{
+        .topLeftCorner = .{
+            .mode = .glyph,
+            .data = .{ .glyph = .{ .char = '+' } },
+        },
+        .topRightCorner = .{
+            .mode = .glyph,
+            .data = .{ .glyph = .{ .char = '+' } },
+        },
+        .bottomLeftCorner = .{
+            .mode = .glyph,
+            .data = .{ .glyph = .{ .char = '+' } },
+        },
+        .bottomRightCorner = .{
+            .mode = .glyph,
+            .data = .{ .glyph = .{ .char = '+' } },
+        },
+        .horizontal = .{
+            .mode = .glyph,
+            .data = .{ .glyph = .{ .char = '-' } },
+        },
+        .vertical = .{
+            .mode = .glyph,
+            .data = .{ .glyph = .{ .char = '|' } },
+        },
+    };
+
+    if (l == 0) {
+        try sborder.drawTop(grid, 0, l, grid.size.cols);
+        l += 1;
+    } else l += 1;
+
+    if (l == grid.size.rows - 1) {
+        try sborder.drawBottom(grid, 0, l, grid.size.cols);
+        return;
+    }
+
     // TODO: make table
     const pidInfo = watcher.pidInfo.?;
     const uptime = pidInfo.uptime;
     const mem = pidInfo.mem;
-    const line = try std.fmt.allocPrint(allocator, "{s}\t{s}\t{s}\t{d}\t{d:.1}%\t{d}:{d:0>2}:{d:0>2}\t{d}{s}\t{s}\n", .{
+    const line = try std.fmt.allocPrint(allocator, " {d}\t{s}\t{s}\t{s}\t{d}\t{d:.1}%\t{d}:{d:0>2}:{d:0>2}\t{d}{s}\t{s} \n", .{
+        l,
         watcher.pidTracker.pidAsStr(),
         pidInfo.user,
         @tagName(pidInfo.currStat.state),
@@ -305,9 +347,11 @@ pub fn writeLineToGrid(allocator: std.mem.Allocator, grid: *Grid, lineN: usize, 
     });
     defer allocator.free(line);
 
-    for (0..@min(line.len, grid.size.cols)) |x| {
-        _ = try grid.put(x, lineN, .glyph, line[x]);
+    _ = try grid.putCell(0, l, &sborder.vertical);
+    for (1..@min(line.len + 1, grid.size.cols - 1)) |x| {
+        _ = try grid.put(x, l, .glyph, line[x - 1]);
     }
+    _ = try grid.putCell(grid.size.cols - 1, l, &sborder.vertical);
 }
 
 pub fn drawTopN(self: *@This(), io: std.Io, allocator: Allocator, grid: *Grid, term: *Terminal) !void {

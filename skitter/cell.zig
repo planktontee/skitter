@@ -374,6 +374,16 @@ pub const CellData = packed union {
     trueColor: TrueColorCell,
     imageRoot: ImageRootCell,
     skip: SkipCell,
+
+    pub fn get(self: @This(), comptime mode: CellMode) mode.concreteType() {
+        return switch (mode) {
+            .glyph => self.glyph.char,
+            .ansi => self.ansi,
+            .trueColor => self.trueColor,
+            .imgRoot => {},
+            .skip => {},
+        };
+    }
 };
 
 // This is not a tagged union to avoid padding
